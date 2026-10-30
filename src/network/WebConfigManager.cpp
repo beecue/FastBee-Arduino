@@ -42,6 +42,7 @@
 #endif
 #include "./network/handlers/ProtocolRouteHandler.h"
 #include "./network/handlers/FeatureRouteHandler.h"
+#include "./network/handlers/McpConfigRouteHandler.h"
 #if FASTBEE_ENABLE_SCREEN_PANEL || FASTBEE_ENABLE_POINT_HISTORY
 #include "network/handlers/ScreenPanelRouteHandler.h"
 #endif
@@ -1282,6 +1283,10 @@ void WebConfigManager::setupAllRoutes() {
 #if FASTBEE_ENABLE_REMOTE_RESOURCES
     remoteResourceHandler->setupRoutes(server);              ROUTE_PROBE("RemoteResource");
 #endif
+
+    // 10c. MCP 统一配置桥（认证、开发者模式和 CSRF 沿用现有链路）
+    static McpConfigRouteHandler mcpConfigRouteHandler(ctx.get());
+    mcpConfigRouteHandler.setupRoutes(server);                ROUTE_PROBE("McpConfig");
 
     // 11. SSE 事件推送路由（/api/events）
     sseRouteHandler->setupRoutes(server);                    ROUTE_PROBE("SSE");

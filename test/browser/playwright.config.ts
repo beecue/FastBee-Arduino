@@ -65,6 +65,12 @@ export default defineConfig({
     },
   },
   projects: [
+    {
+      name: 'mcp',
+      testMatch: /52-ai-mcp-connector|53-mcp-config-lifecycle/,
+      use: { ...devices['Desktop Chrome'] },
+    },
+
     // ─── 优先级分层项目（P0-P4） ─────────────────
 
     // P0 - 冒烟测试：每次构建必跑

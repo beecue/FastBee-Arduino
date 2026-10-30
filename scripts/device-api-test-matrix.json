@@ -52,6 +52,18 @@
       "path": "/api/system/capabilities"
     },
     {
+      "name": "mcp-capabilities",
+      "method": "GET",
+      "path": "/api/mcp/capabilities",
+      "description": "MCP 配置分节、schema 与内容 revision；要求认证和开发者模式"
+    },
+    {
+      "name": "mcp-config-snapshot",
+      "method": "GET",
+      "path": "/api/mcp/config/snapshot",
+      "description": "全分节脱敏快照；不包含网络或协议秘密明文"
+    },
+    {
       "name": "system-metrics",
       "method": "GET",
       "path": "/api/system/metrics"
