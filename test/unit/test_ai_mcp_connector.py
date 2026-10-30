@@ -80,6 +80,20 @@ class AiMcpConnectorContractTests(unittest.TestCase):
         self.assertIn("AbortController", SOURCE)
         self.assertIn("keepalive", SOURCE)
 
+    def test_bfcache_pageshow_resumes_polling(self):
+        self.assertIn("pageshow", SOURCE)
+        self.assertIn("persisted", SOURCE)
+        self.assertIn("_resume", SOURCE)
+
+    def test_consecutive_failures_are_bounded(self):
+        match = re.search(r"MAX_CONSECUTIVE_FAILURES\s*=\s*(\d+)", SOURCE)
+        self.assertIsNotNone(match, "missing MAX_CONSECUTIVE_FAILURES")
+        limit = int(match.group(1))
+        self.assertGreaterEqual(limit, 3)
+        self.assertLessEqual(limit, 100)
+        self.assertIn("_haltUnreachable", SOURCE)
+        self.assertIn("'unreachable'", SOURCE)
+
     def test_result_payload_is_bounded(self):
         self.assertRegex(SOURCE, r"MAX_RESULT_BYTES\s*=\s*\d+")
         self.assertIn("RESULT_TOO_LARGE", SOURCE)

@@ -73,8 +73,14 @@ async function setup(page: any) {
       if (u.pathname === '/connector/v1/heartbeat') return respond(200, { serverTime: Date.now() });
       if (u.pathname === '/connector/v1/revoke') return respond(200, { revoked: true });
       if (u.pathname === '/connector/v1/jobs/poll') {
+        if (w.pollMode === '401') return respond(401, { code: 'SESSION_REVOKED' });
+        if (w.pollMode === 'error') return Promise.reject(new TypeError('network down'));
         return new Promise((_resolve, reject) => {
-          w.pendingPolls.push((jobs: any[]) => _resolve({ status: 200, ok: true, json: async () => ({ jobs, serverTime: Date.now(), waitMs: Math.min(body.waitMs ?? 0, 20000) }) }));
+          w.pendingPolls.push((jobs: any[]) => {
+            if (!jobs && w.pollMode === '401') return _resolve({ status: 401, ok: false, json: async () => ({ code: 'SESSION_REVOKED' }) });
+            if (!jobs && w.pollMode === 'error') return reject(new TypeError('network down'));
+            return _resolve({ status: 200, ok: true, json: async () => ({ jobs: jobs || [], serverTime: Date.now(), waitMs: Math.min(body.waitMs ?? 0, 20000) }) });
+          });
           opts.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
         });
       }
@@ -248,4 +254,69 @@ test('without pairing the connector stays inert and issues no requests', async (
   expect(calls.length).toBe(0);
   const apiCalls = await page.evaluate(() => (window as any).apiCalls);
   expect(apiCalls.length).toBe(0);
+});
+
+test('terminal 401 clears the session and stops polling and heartbeat', async ({ page }) => {
+  await setup(page);
+  await pair(page);
+  await page.evaluate(() => (window as any).FastBeeAiMcpConnector.start());
+  await expect.poll(() => page.evaluate(() => (window as any).pendingPolls.length)).toBe(1);
+  await page.evaluate(() => {
+    const w = window as any;
+    w.pollMode = '401';
+    w.pendingPolls.shift()();
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).FastBeeAiMcpConnector.status().running)).toBe(false);
+  // 终态 401：会话清除，轮询与心跳都不得继续
+  expect(await page.evaluate(() => window.sessionStorage.getItem('fastbee.mcp.connector.session'))).toBeNull();
+  const before = await page.evaluate(() => (window as any).cloudCalls.length);
+  await page.clock.runFor(300000);
+  const after = await page.evaluate(() => (window as any).cloudCalls);
+  expect(after.length).toBe(before);
+  expect(after.filter((c: any) => c.path === '/connector/v1/jobs/poll').length).toBe(1);
+});
+
+test('consecutive network failures are bounded and halt with unreachable state', async ({ page }) => {
+  await setup(page);
+  await pair(page);
+  await page.evaluate(() => (window as any).FastBeeAiMcpConnector.start());
+  await expect.poll(() => page.evaluate(() => (window as any).pendingPolls.length)).toBe(1);
+  await page.evaluate(() => {
+    const w = window as any;
+    w.pollMode = 'error';
+    w.pendingPolls.shift()();
+  });
+  // 退避重试有上限：推进时钟直到停机
+  for (let i = 0; i < 60; i++) {
+    await page.clock.runFor(5000);
+    const running = await page.evaluate(() => (window as any).FastBeeAiMcpConnector.status().running);
+    if (!running) break;
+  }
+  const status = await page.evaluate(() => (window as any).FastBeeAiMcpConnector.status());
+  expect(status.running).toBe(false);
+  expect(status.state).toBe('unreachable');
+  const calls = await page.evaluate(() => (window as any).cloudCalls);
+  const pollCount = calls.filter((c: any) => c.path === '/connector/v1/jobs/poll').length;
+  expect(pollCount).toBeLessThanOrEqual(12);
+  // 停机前上报一次 unreachable；会话保留（非终态 401，可恢复）
+  expect(calls.some((c: any) => c.path === '/connector/v1/heartbeat' && c.body.state === 'unreachable')).toBe(true);
+  expect(await page.evaluate(() => window.sessionStorage.getItem('fastbee.mcp.connector.session'))).not.toBeNull();
+  // 停机后不再有任何云端请求
+  const total = calls.length;
+  await page.clock.runFor(300000);
+  const later = await page.evaluate(() => (window as any).cloudCalls);
+  expect(later.length).toBe(total);
+});
+
+test('pageshow with persisted resumes polling after pagehide', async ({ page }) => {
+  await setup(page);
+  await pair(page);
+  await page.evaluate(() => (window as any).FastBeeAiMcpConnector.start());
+  await expect.poll(() => page.evaluate(() => (window as any).pendingPolls.length)).toBe(1);
+  await page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
+  await expect.poll(() => page.evaluate(() => (window as any).FastBeeAiMcpConnector.status().running)).toBe(false);
+  // bfcache 恢复：pageshow.persisted 后继续轮询
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })));
+  await expect.poll(() => page.evaluate(() => (window as any).FastBeeAiMcpConnector.status().running)).toBe(true);
+  await expect.poll(() => page.evaluate(() => (window as any).pendingPolls.length)).toBe(2);
 });

@@ -5,7 +5,8 @@
  * - 配对码/连接器 token 只存 sessionStorage，不写设备 Flash、URL、日志或模型上下文；
  * - 只执行固定类型白名单任务，拒绝任何携带 URL/方法的任务；
  * - 设备侧只读调用（GET），使用页面现有同源认证，不允许写操作；
- * - 长轮询等待上限 20 秒；页面离线/隐藏/离页时停止轮询并上报最后状态；
+ * - 长轮询等待上限 20 秒；页面离线/隐藏/离页时停止轮询并上报最后状态，bfcache 恢复（pageshow persisted）自动继续；
+ * - 连续失败达到上限后停机并上报最后状态，失效会话不会无限轮询/心跳；
  * - 令牌 15 分钟到期前自动续期，到达云端 8 小时总会话上限后停止并清除会话。
  */
 (function () {
@@ -19,6 +20,8 @@
     var HEARTBEAT_INTERVAL_MS = 60000;
     var POLL_RETRY_BASE_MS = 2000;
     var POLL_RETRY_MAX_MS = 30000;
+    // 连续失败上限：达到后停机并上报最后状态，失效会话不得无限轮询/心跳
+    var MAX_CONSECUTIVE_FAILURES = 10;
 
     // 固定任务类型白名单；云端任务不允许携带 URL/任意方法，只允许下列类型与字段
     var SECTION_PATHS = {
@@ -260,32 +263,64 @@
         _cloudPost(session.cloudBase + '/connector/v1/jobs/poll', { waitMs: waitMs }, session.token,
             controller.signal, false)
             .then(function (resp) {
-                if (!running || controller !== pollController) return;
+                if (!running || controller !== pollController) return 'stale';
                 if (resp.status === 401) {
                     // 轮询期间 token 被续期轮换：直接用新 token 继续；否则会话已失效
-                    if (session && session.token !== tokenAtStart) return;
+                    if (session && session.token !== tokenAtStart) return 'ok';
                     _expireSession();
-                    return;
+                    return 'stopped';
                 }
+                if (!resp || resp.status !== 200) return 'failed';
                 consecutiveErrors = 0;
                 var jobs = (resp.body && resp.body.jobs) || [];
                 return jobs.slice(0, 8).reduce(function (p, job) {
                     return p.then(function () { return _executeJob(job); });
-                }, Promise.resolve());
+                }, Promise.resolve()).then(function () { return 'ok'; });
             })
-            .then(function () {
-                if (running) _pollLoop(pollWaitMs);
+            .then(function (outcome) {
+                if (!running) return;
+                if (outcome === 'failed') {
+                    _registerFailure(pollWaitMs);
+                    return;
+                }
+                if (outcome === 'stale' || outcome === 'stopped') return;
+                _pollLoop(pollWaitMs);
             })
             .catch(function (err) {
                 if (err && err.name === 'AbortError') return;
                 if (!running) return;
-                consecutiveErrors++;
-                var delay = Math.min(POLL_RETRY_MAX_MS, POLL_RETRY_BASE_MS * consecutiveErrors);
-                retryTimer = setTimeout(function () {
-                    retryTimer = null;
-                    if (running) _pollLoop(pollWaitMs);
-                }, delay);
+                _registerFailure(pollWaitMs);
             });
+    }
+
+    // 有界失败计数：连续失败达到上限后停机并上报最后状态，不无限轮询
+    function _registerFailure(pollWaitMs) {
+        consecutiveErrors++;
+        if (consecutiveErrors >= MAX_CONSECUTIVE_FAILURES) {
+            _haltUnreachable();
+            return;
+        }
+        var delay = Math.min(POLL_RETRY_MAX_MS, POLL_RETRY_BASE_MS * consecutiveErrors);
+        retryTimer = setTimeout(function () {
+            retryTimer = null;
+            if (running) _pollLoop(pollWaitMs);
+        }, delay);
+    }
+
+    function _haltUnreachable() {
+        lastState = 'unreachable';
+        running = false;
+        wantResume = true;
+        _clearAllTimers();
+        if (pollController) {
+            pollController.abort();
+            pollController = null;
+        }
+        if (session) {
+            // 停机前上报最后状态（有界一次）；会话保留，恢复在线/页面回显时可继续
+            _cloudPost(session.cloudBase + '/connector/v1/heartbeat', { state: 'unreachable' }, session.token,
+                null, false).catch(function () { /* 不可达场景忽略失败 */ });
+        }
     }
 
     // ---------- 心跳与续期 ----------
@@ -301,12 +336,27 @@
                         _expireSession();
                         return;
                     }
-                    if (running) _scheduleHeartbeat();
+                    if (!running) return;
+                    if (!resp || resp.status !== 200) {
+                        _registerHeartbeatFailure();
+                        return;
+                    }
+                    _scheduleHeartbeat();
                 })
                 .catch(function () {
-                    if (running) _scheduleHeartbeat();
+                    if (running) _registerHeartbeatFailure();
                 });
         }, HEARTBEAT_INTERVAL_MS);
+    }
+
+    // 心跳失败计入同一有界上限（只有轮询成功才清零），失效会话不得无限心跳
+    function _registerHeartbeatFailure() {
+        consecutiveErrors++;
+        if (consecutiveErrors >= MAX_CONSECUTIVE_FAILURES) {
+            _haltUnreachable();
+            return;
+        }
+        _scheduleHeartbeat();
     }
 
     function _scheduleRefresh() {
@@ -419,6 +469,10 @@
         if (listenersBound) return;
         listenersBound = true;
         window.addEventListener('pagehide', function () { _pause('offline', true); });
+        // bfcache 恢复：页面从缓存回显时继续轮询（pagehide 时已记录 wantResume）
+        window.addEventListener('pageshow', function (event) {
+            if (event && event.persisted) _resume();
+        });
         window.addEventListener('offline', function () { _pause('offline', false); });
         window.addEventListener('online', function () { _resume(); });
         document.addEventListener('visibilitychange', function () {
