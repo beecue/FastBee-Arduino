@@ -37,6 +37,7 @@ async function setup(page: any) {
     const w = window as any;
     w.sessionStorage.clear();
     w.apiCalls = [] as string[];
+    w.apiPostCalls = [] as { path: string; body: any }[];
     w.cloudCalls = [] as { path: string; body: any; auth: string | null }[];
     w.pendingPolls = [] as ((jobs: any[]) => void)[];
     w.pairResponse = {
@@ -55,6 +56,17 @@ async function setup(page: any) {
       if (path === '/api/system/capabilities') return structuredClone((window as any).CAPABILITIES);
       if (path === '/api/device/config') return structuredClone((window as any).DEVICE_CONFIG);
       throw new Error('unexpected device api: ' + path);
+    };
+    w.apiPost = async (path: string, body: any) => {
+      w.apiPostCalls.push({ path, body });
+      if (path === '/api/mcp/config/apply') return { success: true, data: { operationId: 'op-browser', state: 'SUCCEEDED' } };
+      if (path === '/api/mcp/config/preflight') return { success: true, data: { allowed: true, persisted: false } };
+      if (path === '/api/mcp/config/readback') {
+        if (w.readbackDisconnect) throw new TypeError('network down');
+        return { success: true, data: { operationId: 'op-browser', state: 'SUCCEEDED' } };
+      }
+      if (path === '/api/mcp/config/rollback') return { success: true, data: { operationId: 'op-browser', state: 'ROLLED_BACK' } };
+      throw new Error('unexpected device write api: ' + path);
     };
     w.fetch = (url: string, opts: any = {}) => {
       const u = new URL(url);
@@ -143,6 +155,49 @@ test('whitelisted job executes via same-origin device api and submits idempotent
   expect(result.body.idempotencyKey).toBe('k-1');
   expect(result.body.result.deviceName).toBe('connector-test');
   expect(result.auth).toBe('Bearer tok-1');
+});
+
+test('managed apply job uses only the fixed same-origin apply API and forwards its idempotency envelope', async ({ page }) => {
+  await setup(page);
+  await pair(page);
+  await page.evaluate(() => (window as any).FastBeeAiMcpConnector.start());
+  await expect.poll(() => page.evaluate(() => (window as any).pendingPolls.length)).toBe(1);
+  await page.evaluate(() => {
+    (window as any).pendingPolls.shift()([
+      { jobId: 'job-apply', type: 'device.config.apply', idempotencyKey: 'cloud-job-key', deadlineAt: Date.now() + 60_000,
+        draftId: 'draft-1', baseRevision: 'rev-a', approvalHash: 'approval', deviceIdempotencyKey: 'device-apply-key',
+        operations: [{ section: 'features', schemaVersion: 1, patch: { enabled: true } }] },
+    ]);
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).cloudCalls.filter((c: any) => c.path.includes('job-apply')).length)).toBe(1);
+  const posts = await page.evaluate(() => (window as any).apiPostCalls);
+  expect(posts).toHaveLength(1);
+  expect(posts[0].path).toBe('/api/mcp/config/apply');
+  expect(posts[0].body).toEqual({ draftId: 'draft-1', baseRevision: 'rev-a', approvalHash: 'approval',
+    idempotencyKey: 'device-apply-key', operations: [{ section: 'features', schemaVersion: 1, patch: { enabled: true } }] });
+  const result = (await page.evaluate(() => (window as any).cloudCalls)).find((c: any) => c.path.includes('job-apply'));
+  expect(result.body.status).toBe('SUCCEEDED');
+  expect(result.body.result.state).toBe('SUCCEEDED');
+});
+
+test('readback disconnect reports UNKNOWN instead of a known device failure', async ({ page }) => {
+  await setup(page);
+  await pair(page);
+  await page.evaluate(() => {
+    (window as any).readbackDisconnect = true;
+    (window as any).FastBeeAiMcpConnector.start();
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).pendingPolls.length)).toBe(1);
+  await page.evaluate(() => {
+    (window as any).pendingPolls.shift()([
+      { jobId: 'job-readback-down', type: 'device.config.readback', operationId: 'op-browser', idempotencyKey: 'k-r',
+        deadlineAt: Date.now() + 60_000 },
+    ]);
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).cloudCalls.filter((c: any) => c.path.includes('job-readback-down')).length)).toBe(1);
+  const result = (await page.evaluate(() => (window as any).cloudCalls)).find((c: any) => c.path.includes('job-readback-down'));
+  expect(result.body.status).toBe('UNKNOWN');
+  expect(result.body.error).toBe('OUTCOME_UNKNOWN');
 });
 
 test('job carrying url or method is rejected without touching the url', async ({ page }) => {

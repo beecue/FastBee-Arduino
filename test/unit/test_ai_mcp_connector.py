@@ -65,11 +65,18 @@ class AiMcpConnectorContractTests(unittest.TestCase):
             self.assertIn(key, SOURCE)
         self.assertIn("INVALID_ARGUMENT", SOURCE)
 
-    def test_device_calls_are_read_only_and_same_origin(self):
-        # 连接器只读设备 API：不允许出现面向设备的 POST/PUT/DELETE 助手
-        self.assertNotIn("_devicePost", SOURCE)
-        self.assertNotIn("_deviceWrite", SOURCE)
+    def test_device_calls_are_same_origin_and_writes_are_fixed_config_jobs(self):
         self.assertIn("_deviceGet", SOURCE)
+        self.assertIn("_devicePost", SOURCE)
+        for job_type, path in (
+            ("device.config.preflight", "/api/mcp/config/preflight"),
+            ("device.config.apply", "/api/mcp/config/apply"),
+            ("device.config.readback", "/api/mcp/config/readback"),
+            ("device.config.rollback", "/api/mcp/config/rollback"),
+        ):
+            self.assertIn(job_type, SOURCE)
+            self.assertIn(f"'{path}'", SOURCE)
+        self.assertIn("OUTCOME_UNKNOWN", SOURCE)
         for forbidden in ("/api/ota", "/api/system/restart", "/api/system/factory-reset", "/api/users"):
             self.assertNotIn(forbidden, SOURCE)
 

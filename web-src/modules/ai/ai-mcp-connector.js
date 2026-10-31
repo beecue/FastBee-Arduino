@@ -4,7 +4,7 @@
  * 在已登录的设备 Web 页面内运行，作为云端 MCP 服务与设备同源 API 之间的有界转发通道：
  * - 配对码/连接器 token 只存 sessionStorage，不写设备 Flash、URL、日志或模型上下文；
  * - 只执行固定类型白名单任务，拒绝任何携带 URL/方法的任务；
- * - 设备侧只读调用（GET），使用页面现有同源认证，不允许写操作；
+ * - 设备调用使用页面现有同源认证；写操作仅限 Task 4 固定配置预检/应用/回读/回滚事务；
  * - 长轮询等待上限 20 秒；页面离线/隐藏/离页时停止轮询并上报最后状态，bfcache 恢复（pageshow persisted）自动继续；
  * - 连续失败达到上限后停机并上报最后状态，失效会话不会无限轮询/心跳；
  * - 令牌 15 分钟到期前自动续期，到达云端 8 小时总会话上限后停止并清除会话。
@@ -34,8 +34,10 @@
         'network': '/api/network/config',
         'screenPanel': '/api/screen-panel/config'
     };
-    var ALLOWED_JOB_KEYS = ['jobId', 'type', 'section', 'idempotencyKey', 'deadlineAt', 'leaseExpiresAt'];
+    var ALLOWED_JOB_KEYS = ['jobId', 'type', 'section', 'idempotencyKey', 'deadlineAt', 'leaseExpiresAt',
+        'draftId', 'baseRevision', 'currentRevision', 'approvalHash', 'deviceIdempotencyKey', 'operations', 'operationId'];
     var FORBIDDEN_JOB_KEYS = ['url', 'method', 'headers', 'body', 'path'];
+    var UNCERTAIN_RESULT_JOB_TYPES = ['device.config.apply', 'device.config.rollback', 'device.config.readback'];
 
     var session = null; // {cloudBase, token, tokenExpiresAt, sessionExpiresAt, deviceId}
     var running = false;
@@ -67,6 +69,29 @@
                 }
                 return body.data;
             });
+        });
+    }
+
+    // 仅固定 Task 4 配置路由使用；结构化设备拒绝是已知失败，断连/无效正文是 UNKNOWN。
+    function _devicePost(path, payload) {
+        function unwrap(resp) {
+            if (!resp || typeof resp !== 'object') throw new Error('OUTCOME_UNKNOWN');
+            if (resp.success === true) return resp.data;
+            var err = new Error(resp.code || resp.error || 'DEVICE_API_FAILED');
+            err.known = true;
+            throw err;
+        }
+        if (typeof window.apiPost === 'function') {
+            return Promise.resolve(window.apiPost(path, payload)).then(unwrap);
+        }
+        return window.fetch(path, {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        }).then(function (resp) {
+            return resp.json().then(function (body) {
+                if (!resp.ok && (!body || body.success !== false)) throw new Error('OUTCOME_UNKNOWN');
+                return unwrap(body);
+            }, function () { throw new Error('OUTCOME_UNKNOWN'); });
         });
     }
 
@@ -169,7 +194,7 @@
         });
     }
 
-    // ---------- 任务执行（固定白名单，只读） ----------
+    // ---------- 任务执行（固定白名单；写类型仅 Task 4 配置事务） ----------
 
     var JOB_HANDLERS = {
         'device.info.read': function () {
@@ -180,10 +205,34 @@
         },
         'device.config.section.read': function (job) {
             var path = SECTION_PATHS[job.section];
-            if (!path) {
-                return Promise.reject(new Error('INVALID_ARGUMENT'));
-            }
+            if (!path) return Promise.reject(new Error('INVALID_ARGUMENT'));
             return _deviceGet(path);
+        },
+        'device.config.snapshot.read': function () {
+            return _deviceGet('/api/mcp/config/snapshot');
+        },
+        'device.config.preflight': function (job) {
+            return _devicePost('/api/mcp/config/preflight', {
+                baseRevision: job.baseRevision, operations: job.operations
+            });
+        },
+        'device.config.apply': function (job) {
+            return _devicePost('/api/mcp/config/apply', {
+                draftId: job.draftId, baseRevision: job.baseRevision, approvalHash: job.approvalHash,
+                idempotencyKey: job.deviceIdempotencyKey, operations: job.operations
+            });
+        },
+        'device.config.operation.read': function (job) {
+            return _deviceGet('/api/mcp/config/operations/' + encodeURIComponent(job.operationId));
+        },
+        'device.config.readback': function (job) {
+            return _devicePost('/api/mcp/config/readback', { operationId: job.operationId });
+        },
+        'device.config.rollback': function (job) {
+            return _devicePost('/api/mcp/config/rollback', {
+                operationId: job.operationId, currentRevision: job.currentRevision,
+                approvalHash: job.approvalHash, idempotencyKey: job.deviceIdempotencyKey
+            });
         }
     };
 
@@ -201,6 +250,12 @@
             }
         }
         if (job.type === 'device.config.section.read' && !SECTION_PATHS[job.section]) return 'INVALID_ARGUMENT';
+        if (['device.config.operation.read', 'device.config.readback', 'device.config.rollback'].indexOf(job.type) >= 0
+                && (typeof job.operationId !== 'string' || !/^[A-Za-z0-9-]{1,128}$/.test(job.operationId))) {
+            return 'INVALID_ARGUMENT';
+        }
+        if (['device.config.preflight', 'device.config.apply'].indexOf(job.type) >= 0
+                && !Array.isArray(job.operations)) return 'INVALID_ARGUMENT';
         return null;
     }
 
@@ -213,6 +268,7 @@
         if (job.deadlineAt && Date.now() > job.deadlineAt) {
             return _submitResult(job.jobId, job.idempotencyKey, 'UNKNOWN', null, 'DEADLINE_EXCEEDED');
         }
+        var writeJob = UNCERTAIN_RESULT_JOB_TYPES.indexOf(job.type) >= 0;
         return Promise.resolve()
             .then(function () { return JOB_HANDLERS[job.type](job); })
             .then(function (data) {
@@ -220,16 +276,22 @@
                 try {
                     json = JSON.stringify(data === undefined ? null : data);
                 } catch (e) {
-                    return _submitResult(job.jobId, job.idempotencyKey, 'FAILED', null, 'INVALID_ARGUMENT');
+                    return _submitResult(job.jobId, job.idempotencyKey, writeJob ? 'UNKNOWN' : 'FAILED', null,
+                        writeJob ? 'OUTCOME_UNKNOWN' : 'INVALID_ARGUMENT');
                 }
-                // 超限结果明确失败，不截断伪造成功
+                // 超限结果明确失败，不截断伪造成功；写后无法证明结果时保持 UNKNOWN。
                 if (json.length > MAX_RESULT_BYTES) {
-                    return _submitResult(job.jobId, job.idempotencyKey, 'FAILED', null, 'RESULT_TOO_LARGE');
+                    return _submitResult(job.jobId, job.idempotencyKey, writeJob ? 'UNKNOWN' : 'FAILED', null,
+                        writeJob ? 'OUTCOME_UNKNOWN' : 'RESULT_TOO_LARGE');
                 }
                 return _submitResult(job.jobId, job.idempotencyKey, 'SUCCEEDED', data, null);
             })
             .catch(function (err) {
-                var code = (err && err.message === 'INVALID_ARGUMENT') ? 'INVALID_ARGUMENT' : 'DEVICE_API_FAILED';
+                var code = (err && err.message === 'INVALID_ARGUMENT') ? 'INVALID_ARGUMENT' :
+                    (err && err.message) || 'DEVICE_API_FAILED';
+                if (writeJob && !(err && err.known)) {
+                    return _submitResult(job.jobId, job.idempotencyKey, 'UNKNOWN', null, 'OUTCOME_UNKNOWN');
+                }
                 return _submitResult(job.jobId, job.idempotencyKey, 'FAILED', null, code);
             });
     }
