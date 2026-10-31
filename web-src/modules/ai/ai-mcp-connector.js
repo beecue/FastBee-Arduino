@@ -72,12 +72,47 @@
         });
     }
 
+    function _isObject(value) {
+        return !!value && typeof value === 'object' && !Array.isArray(value);
+    }
+
+    function _validOperationState(state) {
+        return ['SUCCEEDED', 'FAILED', 'UNKNOWN', 'ROLLED_BACK'].indexOf(state) >= 0;
+    }
+
+    function _validManagedResult(path, data) {
+        if (!_isObject(data)) return false;
+        if (path === '/api/mcp/config/preflight') return typeof data.allowed === 'boolean';
+        if (typeof data.operationId !== 'string' || !/^[A-Za-z0-9-]{1,128}$/.test(data.operationId)) return false;
+        if (!_validOperationState(data.state)) return false;
+        if (data.steps !== undefined) {
+            if (!Array.isArray(data.steps)) return false;
+            for (var i = 0; i < data.steps.length; i++) {
+                var step = data.steps[i];
+                if (!_isObject(step) || typeof step.section !== 'string' || !step.section
+                        || !_validOperationState(step.state)) return false;
+                var flags = ['accepted', 'persisted', 'readback', 'observed', 'physicalConfirmed', 'pendingRestart'];
+                for (var j = 0; j < flags.length; j++) {
+                    if (step[flags[j]] !== undefined && typeof step[flags[j]] !== 'boolean') return false;
+                }
+            }
+        }
+        return true;
+    }
+
     // 仅固定 Task 4 配置路由使用；结构化设备拒绝是已知失败，断连/无效正文是 UNKNOWN。
     function _devicePost(path, payload) {
         function unwrap(resp) {
-            if (!resp || typeof resp !== 'object') throw new Error('OUTCOME_UNKNOWN');
-            if (resp.success === true) return resp.data;
-            var err = new Error(resp.code || resp.error || 'DEVICE_API_FAILED');
+            if (!_isObject(resp)) throw new Error('OUTCOME_UNKNOWN');
+            if (resp.success === true) {
+                if (!_validManagedResult(path, resp.data)) throw new Error('OUTCOME_UNKNOWN');
+                return resp.data;
+            }
+            var code = resp.code || resp.error;
+            if (resp.success !== false || typeof code !== 'string' || !/^[A-Z][A-Z0-9_]{1,63}$/.test(code)) {
+                throw new Error('OUTCOME_UNKNOWN');
+            }
+            var err = new Error(code);
             err.known = true;
             throw err;
         }

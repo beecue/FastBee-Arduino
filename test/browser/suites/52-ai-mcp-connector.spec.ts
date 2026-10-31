@@ -59,7 +59,10 @@ async function setup(page: any) {
     };
     w.apiPost = async (path: string, body: any) => {
       w.apiPostCalls.push({ path, body });
-      if (path === '/api/mcp/config/apply') return { success: true, data: { operationId: 'op-browser', state: 'SUCCEEDED' } };
+      if (path === '/api/mcp/config/apply') {
+        if (w.applyResponses?.length) return w.applyResponses.shift();
+        return { success: true, data: { operationId: 'op-browser', state: 'SUCCEEDED' } };
+      }
       if (path === '/api/mcp/config/preflight') return { success: true, data: { allowed: true, persisted: false } };
       if (path === '/api/mcp/config/readback') {
         if (w.readbackDisconnect) throw new TypeError('network down');
@@ -178,6 +181,38 @@ test('managed apply job uses only the fixed same-origin apply API and forwards i
   const result = (await page.evaluate(() => (window as any).cloudCalls)).find((c: any) => c.path.includes('job-apply'));
   expect(result.body.status).toBe('SUCCEEDED');
   expect(result.body.result.state).toBe('SUCCEEDED');
+});
+
+test('malformed apply success data and unstructured rejection bodies are UNKNOWN', async ({ page }) => {
+  await setup(page);
+  await pair(page);
+  await page.evaluate(() => {
+    (window as any).applyResponses = [
+      { success: true, data: { state: 'SUCCEEDED' } },
+      { success: true, data: { operationId: 'op-bad-state', state: 'MAYBE' } },
+      { success: false, data: { message: 'bad request' } },
+    ];
+    (window as any).FastBeeAiMcpConnector.start();
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).pendingPolls.length)).toBe(1);
+  await page.evaluate(() => {
+    (window as any).pendingPolls.shift()([
+      { jobId: 'job-missing-op', type: 'device.config.apply', idempotencyKey: 'k-m1', deadlineAt: Date.now() + 60_000,
+        draftId: 'draft-1', baseRevision: 'rev-a', approvalHash: 'approval', deviceIdempotencyKey: 'd-m1', operations: [] },
+      { jobId: 'job-bad-state', type: 'device.config.apply', idempotencyKey: 'k-m2', deadlineAt: Date.now() + 60_000,
+        draftId: 'draft-1', baseRevision: 'rev-a', approvalHash: 'approval', deviceIdempotencyKey: 'd-m2', operations: [] },
+      { jobId: 'job-bad-error', type: 'device.config.apply', idempotencyKey: 'k-m3', deadlineAt: Date.now() + 60_000,
+        draftId: 'draft-1', baseRevision: 'rev-a', approvalHash: 'approval', deviceIdempotencyKey: 'd-m3', operations: [] },
+    ]);
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).cloudCalls.filter((c: any) =>
+    ['job-missing-op', 'job-bad-state', 'job-bad-error'].some((id) => c.path.includes(id))).length)).toBe(3);
+  const calls = await page.evaluate(() => (window as any).cloudCalls);
+  for (const id of ['job-missing-op', 'job-bad-state', 'job-bad-error']) {
+    const result = calls.find((c: any) => c.path.includes(id));
+    expect(result.body.status).toBe('UNKNOWN');
+    expect(result.body.error).toBe('OUTCOME_UNKNOWN');
+  }
 });
 
 test('readback disconnect reports UNKNOWN instead of a known device failure', async ({ page }) => {
