@@ -13,6 +13,7 @@ header on the host (no hardware) and pin:
 目录是设备动作语义的唯一权威来源；云端不再维护静态镜像。
 """
 from pathlib import Path
+import json
 import re
 import shutil
 import subprocess
@@ -23,6 +24,34 @@ ROOT = Path(__file__).resolve().parents[2]
 HEADER = (ROOT / 'include/core/ActionTypeCatalog.h').read_text(encoding='utf-8')
 ROUTE_CPP = (ROOT / 'src/network/handlers/PeriphExecRouteHandler.cpp').read_text(encoding='utf-8')
 ROUTE_H = (ROOT / 'include/network/handlers/PeriphExecRouteHandler.h').read_text(encoding='utf-8')
+
+PRODUCTION_CONFIG_PATHS = (
+    'docs/device-test-configs/com15-esp32s3-f16r8/config/periph_exec.json',
+    'docs/device-test-configs/com8-com9-esp32s3-touch/config/periph_exec.json',
+    'docs/device-test-configs/com4-esp32c3-f4r0/config/periph_exec.json',
+    'docs/c6-rgb-led-f4r0/periph_exec.json',
+    'docs/generic-i2c-peripherals/periph_exec.json',
+    'docs/waveshare-esp32s3-relay6ch/periph_exec.json',
+)
+PRODUCTION_ACTIONS = [
+    (path, rule['id'], action)
+    for path in PRODUCTION_CONFIG_PATHS
+    for rule in json.loads((ROOT / path).read_text(encoding='utf-8'))['rules']
+    for action in rule['actions']
+]
+
+
+def production_action_checks():
+    checks = []
+    for index, (_path, _rule_id, action) in enumerate(PRODUCTION_ACTIONS):
+        value = action.get('actionValue', '')
+        assert isinstance(value, str)
+        literal = json.dumps(value, ensure_ascii=False)
+        received = 'true' if action.get('useReceivedValue', False) else 'false'
+        checks.append(f'    if (FastBee::validateRuleActionValue({action["actionType"]}, '
+                      f'{literal}, {received})) return {100 + index};')
+    return '\n'.join(checks)
+
 
 HARNESS = r'''
 #include <cstdio>
@@ -75,6 +104,24 @@ int main() {
     if (FastBee::validateRuleActionValue(24, "12:30", false)) return 17;
     if (!FastBee::validateRuleActionValue(24, "", false)) return 18;
     if (!FastBee::validateRuleActionValue(34, "", true)) return 19;  // 禁止接收值替换
+    // 与 ADMIN crossRuntimeModbusAndControlBoundariesMatchProduction 完全相同的边界输入
+    if (FastBee::validateRuleActionValue(17, "0", false)) return 20;
+    if (FastBee::validateRuleActionValue(17, "65535", false)) return 21;
+    if (FastBee::validateRuleActionValue(17, "65535:65535", false)) return 22;
+    if (!FastBee::validateRuleActionValue(17, "65536", false)) return 23;
+    if (!FastBee::validateRuleActionValue(17, "99999", false)) return 24;
+    if (!FastBee::validateRuleActionValue(17, "65536:0", false)) return 25;
+    if (!FastBee::validateRuleActionValue(17, "0:65536", false)) return 26;
+    if (!FastBee::validateRuleActionValue(17, "100000", false)) return 27;
+    if (FastBee::validateRuleActionValue(18,
+            "{\"ctrl\":[{\"d\":0,\"c\":1,\"a\":\"pwm\",\"v\":10,\"p\":\"param\"}]}", false)) return 28;
+    if (!FastBee::validateRuleActionValue(18,
+            "{\"ctrl\":[{\"d\":0,\"c\":\"1\",\"a\":\"pwm\"}]}", false)) return 29;
+    if (!FastBee::validateRuleActionValue(18,
+            "{\"ctrl\":[{\"d\":0,\"a\":\"pwm\",\"v\":\"10\"}]}", false)) return 30;
+    if (!FastBee::validateRuleActionValue(18,
+            "{\"ctrl\":[{\"d\":0,\"a\":\"pwm\",\"p\":10}]}", false)) return 31;
+    // @PRODUCTION_CONFIG_CHECKS@
     return 0;
 }
 '''
@@ -112,14 +159,15 @@ class ActionTypeCatalogContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='fastbee-action-type-catalog-') as directory:
             source = Path(directory) / 'catalog.cpp'
             binary = Path(directory) / 'catalog.exe'
-            source.write_text(HARNESS, encoding='utf-8')
+            source.write_text(HARNESS.replace('    // @PRODUCTION_CONFIG_CHECKS@',
+                                              production_action_checks()), encoding='utf-8')
             built = subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror',
                 '-I' + str(ROOT / 'test/mocks'), '-I' + str(ROOT / 'include'),
                 '-I' + str(headers[0].parent), str(source), '-o', str(binary)],
                 capture_output=True, text=True, timeout=120)
             assert built.returncode == 0, built.stdout + built.stderr
             ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=15)
-            assert ran.returncode == 0, ran.stdout + ran.stderr
+            assert ran.returncode == 0, f'exit={ran.returncode}: {ran.stdout}{ran.stderr}'
             cls.lines = ran.stdout.splitlines()
         cls.actions = {}
         cls.schemas = {}
@@ -157,6 +205,12 @@ class ActionTypeCatalogContractTests(unittest.TestCase):
         self.assertIsNotNone(self.meta)
         self.assertEqual(self.meta[0], 1)
         self.assertRegex(self.meta[1], r'^\d+\.\d+\.\d+$')
+
+    def test_representative_production_configurations_remain_accepted(self):
+        # setUpClass 已逐动作调用共享生产校验器；此处保证样本覆盖而非空跑
+        self.assertEqual(len(PRODUCTION_CONFIG_PATHS), 6)
+        self.assertEqual(len(PRODUCTION_ACTIONS), 39)
+        self.assertTrue({17, 18, 19}.issubset({action['actionType'] for _, _, action in PRODUCTION_ACTIONS}))
 
     def test_target_types_match_production_predicates(self):        # 与 docs/generated-action-target-contracts.md 普通模式表一致（生产谓词直接证据）
         expected = {

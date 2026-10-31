@@ -56,7 +56,7 @@ const ACTION_TYPES = {
       { value: 6, name: 'ACTION_SYS_RESTART', requiresPeripheralTarget: false,
         valueSchema: { kind: 'none', relaxedByReceivedValue: false, receivedValueAllowed: true } },
       { value: 10, name: 'ACTION_CALL_PERIPHERAL', requiresPeripheralTarget: true,
-        valueSchema: { kind: 'any', relaxedByReceivedValue: false, receivedValueAllowed: true } },
+        valueSchema: { kind: 'nonempty-text', relaxedByReceivedValue: false, receivedValueAllowed: true } },
     ],
   },
 };
@@ -728,9 +728,9 @@ test('oversize execution catalog is dropped from its own bounded channel without
   expect(capabilities.peripheralCatalog.data.gpio[0].value).toBe(12);
 });
 
-test('near-maximum production-size catalog round-trips intact through the bounded channel', async ({ page }) => {
+test('near-boundary execution catalog DTO round-trips intact through the bounded channel', async ({ page }) => {
   await setup(page);
-  // 接近生产上界的目录：41 动作（完整 valueSchema）+ 32 条控制（设备 profile 上限）各带 4 个目标
+  // 出站 DTO 压力样本：34 动作 + 33 控制行；41 生产 schema + 32 控制上限由 ADMIN 集成用例覆盖
   await page.evaluate(() => {
     const w = window as any;
     const big = structuredClone(w.CONTROLS);
