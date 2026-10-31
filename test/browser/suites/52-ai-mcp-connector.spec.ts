@@ -25,6 +25,15 @@ const DEVICE_INFO = {
 const SYSTEM_INFO = { success: true, data: { device: { firmwareVersion: '1.2.3' } } };
 const CAPABILITIES = { success: true, data: { mqtt: true, modbus: true } };
 const DEVICE_CONFIG = { success: true, data: { deviceName: 'connector-test', timezone: 'UTC+8' } };
+// 与固件 /api/peripherals/types 契约同形状的外设类型目录
+const PERIPHERAL_TYPES = {
+  success: true,
+  profile: { name: 'ESP32-S3', max: 16, used: 0, remaining: 16 },
+  hardware: { chip: 'ESP32-S3', maxGpio: 48, inputPins: [4], outputPins: [15, 16], adcPins: [], dacPins: [], touchPins: [], reservedPins: [26] },
+  data: {
+    gpio: [{ value: 12, name: 'Digital Output', pinCount: 1, implemented: true, configurable: true, pinRoles: ['GPIO'], operations: [] }],
+  },
+};
 
 async function setup(page: any) {
   await page.clock.install();
@@ -54,6 +63,10 @@ async function setup(page: any) {
       if (path === '/api/device/info') return structuredClone((window as any).DEVICE_INFO);
       if (path.startsWith('/api/system/info')) return structuredClone((window as any).SYSTEM_INFO);
       if (path === '/api/system/capabilities') return structuredClone((window as any).CAPABILITIES);
+      if (path === '/api/peripherals/types') {
+        if ((window as any).typesFail) throw new Error('types endpoint down');
+        return structuredClone((window as any).PERIPHERAL_TYPES);
+      }
       if (path === '/api/device/config') return structuredClone((window as any).DEVICE_CONFIG);
       throw new Error('unexpected device api: ' + path);
     };
@@ -109,7 +122,8 @@ async function setup(page: any) {
     w.SYSTEM_INFO = fixtures.SYSTEM_INFO;
     w.CAPABILITIES = fixtures.CAPABILITIES;
     w.DEVICE_CONFIG = fixtures.DEVICE_CONFIG;
-  }, { DEVICE_INFO, SYSTEM_INFO, CAPABILITIES, DEVICE_CONFIG });
+    w.PERIPHERAL_TYPES = fixtures.PERIPHERAL_TYPES;
+  }, { DEVICE_INFO, SYSTEM_INFO, CAPABILITIES, DEVICE_CONFIG, PERIPHERAL_TYPES });
 }
 
 async function pair(page: any) {
@@ -421,4 +435,49 @@ test('pageshow with persisted resumes polling after pagehide', async ({ page }) 
   await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })));
   await expect.poll(() => page.evaluate(() => (window as any).FastBeeAiMcpConnector.status().running)).toBe(true);
   await expect.poll(() => page.evaluate(() => (window as any).pendingPolls.length)).toBe(2);
+});
+
+test('pair sends the real peripheral type catalog with device capabilities', async ({ page }) => {
+  await setup(page);
+  await pair(page);
+  const calls = await page.evaluate(() => (window as any).cloudCalls);
+  const pairCall = calls.find((c: any) => c.path === '/connector/v1/pair');
+  // 能力载荷必须携带真实 /api/peripherals/types 目录（云端外设工具的 schema 来源）
+  expect(pairCall.body.device.capabilities.peripheralCatalog.data.gpio[0].value).toBe(12);
+  expect(pairCall.body.device.capabilities.peripheralCatalog.hardware.maxGpio).toBe(48);
+  const apiCalls = await page.evaluate(() => (window as any).apiCalls);
+  expect(apiCalls).toContain('/api/peripherals/types');
+});
+
+test('pair proceeds without catalog when the types endpoint fails and marks it unavailable', async ({ page }) => {
+  await setup(page);
+  await page.evaluate(() => { (window as any).typesFail = true; });
+  const result = await page.evaluate(async (cloud: string) => {
+    return await (window as any).FastBeeAiMcpConnector.pair(cloud, 'ABCD234567');
+  }, CLOUD);
+  // 目录读取失败不阻断配对；云端外设工具按目录缺失失败关闭
+  expect(result.ok).toBe(true);
+  const calls = await page.evaluate(() => (window as any).cloudCalls);
+  const pairCall = calls.find((c: any) => c.path === '/connector/v1/pair');
+  expect(pairCall.body.device.capabilities.peripheralCatalog).toBeUndefined();
+  expect(pairCall.body.device.capabilities.peripheralCatalogAvailable).toBe(false);
+});
+
+test('capabilities refresh job returns the combined bounded catalog payload', async ({ page }) => {
+  await setup(page);
+  await pair(page);
+  await page.evaluate(() => (window as any).FastBeeAiMcpConnector.start());
+  await expect.poll(() => page.evaluate(() => (window as any).pendingPolls.length)).toBe(1);
+  await page.evaluate(() => {
+    (window as any).pendingPolls.shift()([
+      { jobId: 'job-cap', type: 'device.capabilities.read', idempotencyKey: 'k-cap', deadlineAt: Date.now() + 60_000, leaseExpiresAt: Date.now() + 60_000 },
+    ]);
+  });
+  await expect.poll(() => page.evaluate(() =>
+    (window as any).cloudCalls.filter((c: any) => c.path.endsWith('/result')).length)).toBe(1);
+  const calls = await page.evaluate(() => (window as any).cloudCalls);
+  const result = calls.find((c: any) => c.path.endsWith('/result'));
+  expect(result.body.status).toBe('SUCCEEDED');
+  expect(result.body.result.mqtt).toBe(true);
+  expect(result.body.result.peripheralCatalog.data.gpio[0].name).toBe('Digital Output');
 });

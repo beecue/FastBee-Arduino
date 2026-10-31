@@ -120,6 +120,19 @@ class AiMcpConnectorContractTests(unittest.TestCase):
         self.assertIn("idempotencyKey", SOURCE)
         self.assertIn("leaseExpiresAt", SOURCE)
 
+    def test_pairing_and_capability_refresh_carry_peripheral_catalog(self):
+        # 配对与能力刷新都必须读取真实外设类型目录（云端外设工具的 schema 来源）
+        self.assertEqual(SOURCE.count("'/api/peripherals/types'"), 2)
+        self.assertIn("_buildCapabilities", SOURCE)
+        self.assertIn("peripheralCatalog", SOURCE)
+        # 有界上限：超限放弃目录而不是截断伪造；目录缺失显式标记
+        match = re.search(r"MAX_CAPABILITIES_BYTES\s*=\s*(\d+)", SOURCE)
+        self.assertIsNotNone(match, "missing MAX_CAPABILITIES_BYTES")
+        self.assertGreaterEqual(int(match.group(1)), 8192)
+        self.assertLessEqual(int(match.group(1)), 16 * 1024)
+        self.assertIn("peripheralCatalogAvailable", SOURCE)
+        self.assertIn("peripheralCatalogOversize", SOURCE)
+
 
 if __name__ == "__main__":
     unittest.main()
