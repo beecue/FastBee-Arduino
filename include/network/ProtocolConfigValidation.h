@@ -95,7 +95,8 @@ inline bool validateMqttCandidate(JsonVariantConst value, String& error) {
                             "ntpServer","willTopic","willPayload","iccid","summary","connectionTestId"}) {
         if (!protocolText(mqtt[key])) return protocolError(error, "MQTT_TYPE_INVALID");
     }
-    if (mqtt.containsKey("publishTopic") && !validOptionalMqttTopic(mqtt["publishTopic"], true, false))
+    if (mqtt.containsKey("publishTopic") &&
+        (mqtt["publishTopic"].isNull() || !validOptionalMqttTopic(mqtt["publishTopic"], true, false)))
         return protocolError(error, "MQTT_PUBLISH_TOPIC_INVALID");
     if (!validOptionalMqttTopic(mqtt["subscribeTopic"], false, true) ||
         !validOptionalMqttTopic(mqtt["willTopic"], true, true) ||

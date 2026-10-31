@@ -1381,13 +1381,14 @@ bool ManagedConfigApplyService::recoverOperation(const String& operationId,
         step.state = "SUCCEEDED";
         step.error = "";
     }
+    bool complete = proven;
     for (size_t i = 0; i < record->stepCount; ++i) {
         if (record->steps[i].state != "SUCCEEDED") {
-            proven = false;
+            complete = false;
             break;
         }
     }
-    if (proven) {
+    if (complete) {
         if (record->rollback) {
             record->state = "ROLLED_BACK";
             record->error = "";
@@ -1402,10 +1403,18 @@ bool ManagedConfigApplyService::recoverOperation(const String& operationId,
         record->readbackRequired = false;
         record->manualRecoveryRequired = false;
         unresolvedOperationId_.clear();
+    } else if (proven) {
+        record->state = "FAILED";
+        record->error = failureCode.isEmpty()
+            ? String(record->rollback ? "PARTIAL_ROLLBACK" : "PARTIAL_APPLY") : failureCode;
+        record->readbackRequired = false;
+        record->manualRecoveryRequired = true;
+        unresolvedOperationId_.clear();
+        error = record->error;
     } else {
-        record->state = record->rollback ? "UNKNOWN" : knownFailure ? "FAILED" : "UNKNOWN";
-        record->error = knownFailure ? failureCode : "OUTCOME_UNKNOWN";
-        record->readbackRequired = record->state == "UNKNOWN";
+        record->state = "UNKNOWN";
+        record->error = "OUTCOME_UNKNOWN";
+        record->readbackRequired = true;
         record->manualRecoveryRequired = true;
         unresolvedOperationId_ = record->id;
         error = record->error;
@@ -1442,7 +1451,7 @@ String ManagedConfigApplyService::rollback(JsonVariantConst request, JsonDocumen
     }
     if (checkUnknownGate(output, error)) return error;
     OperationRecord* original = findOperation(id);
-    if (!original || original->rollback) {
+    if (!original) {
         fail(output, "OPERATION_NOT_FOUND", error, "Operation is unavailable in this boot");
         return output["code"].as<const char*>();
     }

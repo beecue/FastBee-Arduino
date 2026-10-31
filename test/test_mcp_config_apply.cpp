@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <atomic>
+#include <fstream>
 #include <thread>
 #include <vector>
 
@@ -120,7 +121,8 @@ public:
             if (state_[field] == "********") state_[field] = secrets[field];
         }
         const bool restart = candidate["pendingRestart"] == true;
-        if (unknownAfterSuccessfulCalls > 0 && applyCalls > unknownAfterSuccessfulCalls) {
+        if (unknownAfterSuccessfulCalls > 0 && applyCalls > unknownAfterSuccessfulCalls && !unknownOnceConsumed) {
+            unknownOnceConsumed = true;
             mismatchNextReadback = true;
             return {FastBee::ManagedAdapterApplyStatus::Unknown, restart, "OUTCOME_UNKNOWN"};
         }
@@ -185,6 +187,7 @@ public:
     int readbackCalls = 0;
     int secretCalls = 0;
     int unknownAfterSuccessfulCalls = 0;
+    bool unknownOnceConsumed = false;
     bool mismatchNextReadback = false;
     std::vector<String>* lastOrder = nullptr;
 };
@@ -664,10 +667,10 @@ void test_recovery_requires_every_apply_step_succeeded() {
     String error;
     TEST_ASSERT_EQUAL_STRING("OUTCOME_UNKNOWN", fixture.service.apply(body, result, error).c_str());
     const String operationId = result["operationId"].as<const char*>();
-    TEST_ASSERT_FALSE(fixture.service.recoverOperation(operationId, result, error));
-    TEST_ASSERT_EQUAL_STRING("UNKNOWN", result["state"]);
+    TEST_ASSERT_TRUE(fixture.service.recoverOperation(operationId, result, error));
+    TEST_ASSERT_EQUAL_STRING("FAILED", result["state"]);
     TEST_ASSERT_TRUE(result["manualRecoveryRequired"]);
-    TEST_ASSERT_TRUE(result["readbackRequired"]);
+    TEST_ASSERT_FALSE(result["readbackRequired"]);
     TEST_ASSERT_EQUAL_STRING("PENDING", result["steps"][1]["state"]);
     TEST_ASSERT_EQUAL(0, fixture.peripherals.applyCalls);
 }
@@ -700,6 +703,84 @@ void test_rollback_recovery_requires_every_step_succeeded() {
     TEST_ASSERT_EQUAL_STRING("SUCCEEDED", original["state"]);
 }
 
+void test_partial_apply_recovery_allows_confirmed_rollback_of_persisted_steps() {
+    Fixture fixture;
+    JsonDocument body = applyBody(fixture,
+        "[{\"section\":\"features\",\"schemaVersion\":1,\"patch\":{\"applyUnknownPersisted\":true,\"deferUnknownReadback\":true}},"
+        "{\"section\":\"peripherals\",\"schemaVersion\":1,\"patch\":{\"enabled\":true}}]",
+        "partial-recovery-rollback");
+    JsonDocument result;
+    String error;
+    fixture.service.apply(body, result, error);
+    const String operationId = result["operationId"].as<const char*>();
+    TEST_ASSERT_TRUE(fixture.service.recoverOperation(operationId, result, error));
+    TEST_ASSERT_EQUAL_STRING("FAILED", result["state"]);
+    TEST_ASSERT_FALSE(result["readbackRequired"]);
+    TEST_ASSERT_TRUE(result["manualRecoveryRequired"]);
+
+    JsonDocument rollback;
+    rollback["operationId"] = operationId;
+    rollback["idempotencyKey"] = "partial-recovery-rollback-confirm";
+    rollback["approvalHash"] = FastBee::ManagedConfigRevision::rollbackApprovalHash(
+        operationId, revision(fixture));
+    TEST_ASSERT_TRUE(fixture.service.rollback(rollback, result, error).isEmpty());
+    TEST_ASSERT_EQUAL_STRING("ROLLED_BACK", result["state"]);
+    TEST_ASSERT_EQUAL(2, fixture.features.applyCalls);
+    TEST_ASSERT_EQUAL(0, fixture.peripherals.applyCalls);
+    JsonDocument original;
+    TEST_ASSERT_TRUE(fixture.service.operation(operationId, original, error));
+    TEST_ASSERT_EQUAL_STRING("ROLLED_BACK", original["state"]);
+}
+
+void test_partial_rollback_recovery_allows_rerollback_of_persisted_steps() {
+    Fixture fixture;
+    fixture.peripherals.unknownAfterSuccessfulCalls = 1;
+    JsonDocument body = applyBody(fixture,
+        "[{\"section\":\"features\",\"schemaVersion\":1,\"patch\":{\"enabled\":true}},"
+        "{\"section\":\"peripherals\",\"schemaVersion\":1,\"patch\":{\"enabled\":true}}]",
+        "partial-rerollback-recovery");
+    JsonDocument result;
+    String error;
+    TEST_ASSERT_TRUE(fixture.service.apply(body, result, error).isEmpty());
+    const String originalId = result["operationId"].as<const char*>();
+    JsonDocument rollback;
+    rollback["operationId"] = originalId;
+    rollback["idempotencyKey"] = "partial-rerollback-first";
+    rollback["approvalHash"] = FastBee::ManagedConfigRevision::rollbackApprovalHash(
+        originalId, revision(fixture));
+    TEST_ASSERT_EQUAL_STRING("OUTCOME_UNKNOWN", fixture.service.rollback(rollback, result, error).c_str());
+    const String rollbackId = result["operationId"].as<const char*>();
+    TEST_ASSERT_FALSE(fixture.service.recoverOperation(rollbackId, result, error));
+    TEST_ASSERT_EQUAL_STRING("UNKNOWN", result["state"]);
+    TEST_ASSERT_TRUE(fixture.service.recoverOperation(rollbackId, result, error));
+    TEST_ASSERT_EQUAL_STRING("FAILED", result["state"]);
+    TEST_ASSERT_FALSE(result["readbackRequired"]);
+    TEST_ASSERT_TRUE(result["manualRecoveryRequired"]);
+
+    JsonDocument second;
+    second["operationId"] = rollbackId;
+    second["idempotencyKey"] = "partial-rerollback-second";
+    second["approvalHash"] = FastBee::ManagedConfigRevision::rollbackApprovalHash(
+        rollbackId, revision(fixture));
+    TEST_ASSERT_TRUE(fixture.service.rollback(second, result, error).isEmpty());
+    TEST_ASSERT_EQUAL_STRING("ROLLED_BACK", result["state"]);
+    TEST_ASSERT_EQUAL(1, fixture.features.applyCalls);
+    TEST_ASSERT_EQUAL(3, fixture.peripherals.applyCalls);
+    JsonDocument original;
+    TEST_ASSERT_TRUE(fixture.service.operation(originalId, original, error));
+    TEST_ASSERT_EQUAL_STRING("SUCCEEDED", original["state"]);
+}
+
+void test_default_factory_protocol_is_valid() {
+    std::ifstream input("data/config/protocol.json");
+    TEST_ASSERT_TRUE(input.good());
+    JsonDocument document;
+    const auto error = deserializeJson(document, input);
+    TEST_ASSERT_FALSE(error);
+    String validationError;
+    TEST_ASSERT_TRUE(FastBee::validateProtocolConfigDocument(document, validationError));
+}
+
 void test_filtered_snapshot_keeps_complete_global_revision() {
     Fixture fixture;
     JsonDocument all;
@@ -718,6 +799,7 @@ void test_singular_publish_and_legacy_fields_are_validated() {
     for (const char* candidate : {
              "{\"mqtt\":{\"publishTopic\":\"\"}}",
              "{\"mqtt\":{\"publishTopic\":\"bad/+\"}}",
+             "{\"mqtt\":{\"publishTopic\":null}}",
              "{\"mqtt\":{\"publishTopic\":17}}",
              "{\"mqtt\":{\"publishQos\":3}}",
              "{\"mqtt\":{\"publishRetain\":\"false\"}}",
@@ -728,6 +810,8 @@ void test_singular_publish_and_legacy_fields_are_validated() {
     }
     JsonDocument valid = parse("{\"mqtt\":{\"publishTopic\":\"/property/post\",\"publishQos\":1,\"publishRetain\":false}}");
     TEST_ASSERT_TRUE(FastBee::validateProtocolConfigDocument(valid, error));
+    JsonDocument absentLegacy = parse("{\"mqtt\":{}}");
+    TEST_ASSERT_TRUE(FastBee::validateProtocolConfigDocument(absentLegacy, error));
 }
 
 void test_same_origin_rejects_cross_origin_mutation() {
@@ -787,6 +871,9 @@ void test_mcp_config_apply_group() {
     RUN_TEST(test_rollback_unknown_recovers_to_rolled_back_without_replay);
     RUN_TEST(test_recovery_requires_every_apply_step_succeeded);
     RUN_TEST(test_rollback_recovery_requires_every_step_succeeded);
+    RUN_TEST(test_partial_apply_recovery_allows_confirmed_rollback_of_persisted_steps);
+    RUN_TEST(test_partial_rollback_recovery_allows_rerollback_of_persisted_steps);
+    RUN_TEST(test_default_factory_protocol_is_valid);
     RUN_TEST(test_filtered_snapshot_keeps_complete_global_revision);
     RUN_TEST(test_singular_publish_and_legacy_fields_are_validated);
     RUN_TEST(test_same_origin_rejects_cross_origin_mutation);
