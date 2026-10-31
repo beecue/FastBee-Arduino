@@ -183,7 +183,7 @@ test('managed apply job uses only the fixed same-origin apply API and forwards i
   expect(result.body.result.state).toBe('SUCCEEDED');
 });
 
-test('malformed apply success data and unstructured rejection bodies are UNKNOWN', async ({ page }) => {
+test('malformed success data and structured UNKNOWN are UNKNOWN while definitive rejection stays FAILED', async ({ page }) => {
   await setup(page);
   await pair(page);
   await page.evaluate(() => {
@@ -191,6 +191,8 @@ test('malformed apply success data and unstructured rejection bodies are UNKNOWN
       { success: true, data: { state: 'SUCCEEDED' } },
       { success: true, data: { operationId: 'op-bad-state', state: 'MAYBE' } },
       { success: false, data: { message: 'bad request' } },
+      { success: false, code: 'OUTCOME_UNKNOWN' },
+      { success: false, code: 'INVALID_ARGUMENT' },
     ];
     (window as any).FastBeeAiMcpConnector.start();
   });
@@ -203,16 +205,23 @@ test('malformed apply success data and unstructured rejection bodies are UNKNOWN
         draftId: 'draft-1', baseRevision: 'rev-a', approvalHash: 'approval', deviceIdempotencyKey: 'd-m2', operations: [] },
       { jobId: 'job-bad-error', type: 'device.config.apply', idempotencyKey: 'k-m3', deadlineAt: Date.now() + 60_000,
         draftId: 'draft-1', baseRevision: 'rev-a', approvalHash: 'approval', deviceIdempotencyKey: 'd-m3', operations: [] },
+      { jobId: 'job-structured-unknown', type: 'device.config.apply', idempotencyKey: 'k-m4', deadlineAt: Date.now() + 60_000,
+        draftId: 'draft-1', baseRevision: 'rev-a', approvalHash: 'approval', deviceIdempotencyKey: 'd-m4', operations: [] },
+      { jobId: 'job-known-rejection', type: 'device.config.apply', idempotencyKey: 'k-m5', deadlineAt: Date.now() + 60_000,
+        draftId: 'draft-1', baseRevision: 'rev-a', approvalHash: 'approval', deviceIdempotencyKey: 'd-m5', operations: [] },
     ]);
   });
-  await expect.poll(() => page.evaluate(() => (window as any).cloudCalls.filter((c: any) =>
-    ['job-missing-op', 'job-bad-state', 'job-bad-error'].some((id) => c.path.includes(id))).length)).toBe(3);
+  await expect.poll(() => page.evaluate(() => (window as any).cloudCalls.filter((c: any) => c.path.includes('job-')).length >= 5))
+    .toBe(true);
   const calls = await page.evaluate(() => (window as any).cloudCalls);
-  for (const id of ['job-missing-op', 'job-bad-state', 'job-bad-error']) {
+  for (const id of ['job-missing-op', 'job-bad-state', 'job-bad-error', 'job-structured-unknown']) {
     const result = calls.find((c: any) => c.path.includes(id));
     expect(result.body.status).toBe('UNKNOWN');
     expect(result.body.error).toBe('OUTCOME_UNKNOWN');
   }
+  const rejection = calls.find((c: any) => c.path.includes('job-known-rejection'));
+  expect(rejection.body.status).toBe('FAILED');
+  expect(rejection.body.error).toBe('INVALID_ARGUMENT');
 });
 
 test('readback disconnect reports UNKNOWN instead of a known device failure', async ({ page }) => {

@@ -100,6 +100,14 @@
         return true;
     }
 
+    function _definitiveDeviceRejection(code) {
+        return ['INVALID_ARGUMENT', 'SCHEMA_VERSION_UNSUPPORTED', 'CAPABILITY_UNSUPPORTED', 'CONFIG_REVISION_CONFLICT',
+            'PREFLIGHT_FAILED', 'CONFIRMATION_REQUIRED', 'CONFIRMATION_EXPIRED', 'SECRET_REQUIRED', 'DRAFT_CONFLICT',
+            'DRAFT_NOT_FOUND', 'DEVICE_NOT_FOUND', 'DEVICE_IDENTITY_CONFLICT', 'OPERATION_IN_PROGRESS', 'QUOTA_EXCEEDED',
+            'MANUAL_RECOVERY_REQUIRED', 'IDEMPOTENCY_CONFLICT', 'IDEMPOTENCY_KEY_CONFLICT', 'AUDIT_UNAVAILABLE',
+            'FORBIDDEN', 'UNAUTHENTICATED', 'SAVE_FAILED', 'PERSIST_FAILED'].indexOf(code) >= 0;
+    }
+
     // 仅固定 Task 4 配置路由使用；结构化设备拒绝是已知失败，断连/无效正文是 UNKNOWN。
     function _devicePost(path, payload) {
         function unwrap(resp) {
@@ -109,7 +117,8 @@
                 return resp.data;
             }
             var code = resp.code || resp.error;
-            if (resp.success !== false || typeof code !== 'string' || !/^[A-Z][A-Z0-9_]{1,63}$/.test(code)) {
+            if (resp.success !== false || typeof code !== 'string' || !/^[A-Z][A-Z0-9_]{1,63}$/.test(code)
+                    || !_definitiveDeviceRejection(code)) {
                 throw new Error('OUTCOME_UNKNOWN');
             }
             var err = new Error(code);
