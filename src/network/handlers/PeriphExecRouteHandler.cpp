@@ -1843,13 +1843,6 @@ void PeriphExecRouteHandler::parseRuleFromJson(JsonObject& obj, PeriphExecRule& 
 }
 
 namespace {
-bool parseStrictLong(const String& text, long& value) {
-    if (text.isEmpty()) return false;
-    char* end = nullptr;
-    value = strtol(text.c_str(), &end, 10);
-    return end && end != text.c_str() && *end == '\0';
-}
-
 bool parseClockTime(const String& value) {
     if (value.length() != 5 || value[2] != ':') return false;
     if (!isDigit(value[0]) || !isDigit(value[1]) ||
@@ -2172,9 +2165,7 @@ void PeriphExecRouteHandler::handlePreflightRuleJson(AsyncWebServerRequest* requ
                          remoteErrorMessage);
             }
         }
-        if (action.actionType == 34 &&
-            (action.targetPeriphId.isEmpty() || !action.actionValue.isEmpty() ||
-             action.useReceivedValue)) {
+        if (action.actionType == 34 && action.targetPeriphId.isEmpty()) {
             addIssue("INVALID_REMOTE_READ", "error", path,
                      "Remote read requires a source ID and no action value");
         }
@@ -2220,51 +2211,14 @@ void PeriphExecRouteHandler::handlePreflightRuleJson(AsyncWebServerRequest* requ
                      "Trigger-event action requires an event ID");
         }
         if (action.actionType == 31 || action.actionType == 32) {
-            if (action.actionValue != "webServer" && action.actionValue != "mdns") {
-                addIssue("FEATURE_NOT_ALLOWED", "error", path + ".actionValue",
-                         "Feature actions may only target webServer or mdns");
-            }
             if (risk < 1) risk = 1;
         }
 
-        long numeric = 0;
-        if (!action.useReceivedValue && (action.actionType == 2 || action.actionType == 3)) {
-            if (!parseStrictLong(action.actionValue, numeric) || numeric < 50 || numeric > 60000) {
-                addIssue("INVALID_EFFECT_INTERVAL", "error", path + ".actionValue",
-                         "Blink/breathe interval must be 50-60000 ms");
-            }
-        }
-        if (!action.useReceivedValue && action.actionType == 4) {
-            if (!parseStrictLong(action.actionValue, numeric) || numeric < 0 || numeric > 65535) {
-                addIssue("INVALID_PWM_VALUE", "error", path + ".actionValue",
-                         "PWM value must be between 0 and 65535");
-            }
-        }
-        if (!action.useReceivedValue && action.actionType == 5) {
-            uint8_t dacValue = 0;
-            if (!FastBee::parseDacActionValue(action.actionValue.c_str(), action.actionValue.length(), dacValue)) {
-                addIssue("INVALID_DAC_VALUE", "error", path + ".actionValue",
-                         "DAC value must be between 0 and 255");
-            }
-        }
-        if (action.actionType == 15 && action.actionValue.isEmpty()) {
-            addIssue("SCRIPT_ACTION_EMPTY", "error", path + ".actionValue",
-                     "Script action requires command content");
-        }
-        if (action.actionType == 18) {
-            JsonDocument poll;
-            if (action.actionValue.isEmpty() || deserializeJson(poll, action.actionValue.c_str(), action.actionValue.length()) ||
-                (!poll["poll"].is<JsonArray>() && !poll["ctrl"].is<JsonArray>())) {
-                addIssue("INVALID_MODBUS_POLL", "error", path + ".actionValue",
-                         "Modbus poll value must be JSON with poll or ctrl array");
-            }
-        }
-        if (action.actionType == 19) {
-            JsonDocument sensor;
-            if (action.actionValue.isEmpty() || deserializeJson(sensor, action.actionValue.c_str(), action.actionValue.length())) {
-                addIssue("INVALID_SENSOR_CONFIG", "error", path + ".actionValue",
-                         "Sensor read actionValue must be valid JSON");
-            }
+        // 动作值形态：与 ActionValueContract 的共享生产校验器同源（目录生成消费同一实现），
+        // 覆盖电平/数值/枚举/JSON/Modbus 写/UART 命令等逐动作契约
+        if (const char* valueError = FastBee::validateRuleActionValue(
+                action.actionType, action.actionValue.c_str(), action.useReceivedValue)) {
+            addIssue(valueError, "error", path + ".actionValue", "Invalid action value for this action type");
         }
     }
 

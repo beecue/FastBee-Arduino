@@ -222,6 +222,11 @@
     var EXEC_SNAPSHOT_PATH = '/api/mcp/config/snapshot';
     var EXEC_CATALOG_SCHEMA_VERSION = 1;
     var EXEC_CONTROL_GROUPS = ['gpio', 'modbus', 'system', 'script', 'sensor', 'other'];
+    // 执行目录的独立传输上界（独立于能力载荷预算）：
+    // 生产上界 = 41 动作 × ~200B（含完整 valueSchema）+ 静态事件/触发类型（裁剪后 ≈1.5KB）
+    // + 控制目录（≤32 规则 × ~140B 裁剪行）+ 元数据 ≈ 15KB，按 1.5× 余量取 24 KiB；
+    // 超限即整体放弃（云端按缺失失败关闭），绝不截断伪造
+    var MAX_EXEC_CATALOG_BYTES = 24576;
 
     function _isNonBlankString(value, maxLen) {
         return typeof value === 'string' && value.length > 0 && value.length <= maxLen;
@@ -304,7 +309,8 @@
      * 读取设备执行目录（触发类型 + 静态事件 + 生产动作类型目录 + 控制目录 + 当前配置 revision）。
      * 所有子目录都必须通过严格形状校验（类型化必填字段、唯一 ID）；任一端点失败或畸形即返回
      * { failed: true }，绝不截断或编造部分目录——配对按目录缺失失败关闭，能力刷新据 failed
-     * 标记保留旧注册。
+     * 标记保留旧注册。传输只携带云端消费的语义字段（事件/触发类型的展示名、控制项的
+     * 名称/计数等展示字段不随目录走），动作完整 valueSchema 不裁剪。
      */
     function _fetchExecutionCatalog() {
         return Promise.all([
@@ -320,16 +326,48 @@
                     || !_validActionTypes(results[2]) || !_validControls(results[3])) {
                 return { failed: true };
             }
-            return { failed: false, catalog: {
+            var catalog = {
                 schemaVersion: EXEC_CATALOG_SCHEMA_VERSION,
                 firmwareVersion: results[2].firmwareVersion,
                 configRevision: configRevision,
-                triggerTypes: results[0],
-                events: results[1],
-                actions: results[2].actions,
-                controls: results[3]
-            } };
+                // 云端只消费类型值/ID 成员资格：展示名随设备页面本地化，不进目录
+                triggerTypes: results[0].map(function (t) { return { type: t.type }; }),
+                events: results[1].map(function (e) { return { id: e.id, type: e.type }; }),
+                actions: results[2].actions.map(function (a) {
+                    var row = { value: a.value, name: a.name,
+                        requiresPeripheralTarget: a.requiresPeripheralTarget, valueSchema: a.valueSchema };
+                    if (a.targetTypes !== undefined && a.targetTypes !== null) row.targetTypes = a.targetTypes;
+                    return row;
+                }),
+                controls: _compactControls(results[3])
+            };
+            try {
+                if (_utf8Bytes(JSON.stringify(catalog)) > MAX_EXEC_CATALOG_BYTES) {
+                    return { failed: true, oversize: true };
+                }
+            } catch (e) {
+                return { failed: true, oversize: true };
+            }
+            return { failed: false, catalog: catalog };
         });
+    }
+
+    // 控制目录裁剪：只保留云端校验消费的字段（id/actionType/enabled/targetPeriphId/targets[].id）
+    function _compactControls(data) {
+        var out = {};
+        for (var g = 0; g < EXEC_CONTROL_GROUPS.length; g++) {
+            var name = EXEC_CONTROL_GROUPS[g];
+            out[name] = data[name].map(function (item) {
+                var row = { id: item.id, actionType: item.actionType, enabled: item.enabled === true };
+                if (_isNonBlankString(item.targetPeriphId, 40)) row.targetPeriphId = item.targetPeriphId;
+                if (Array.isArray(item.targets)) {
+                    row.targets = item.targets.map(function (t) { return { id: t && t.id }; })
+                        .filter(function (t) { return _isNonBlankString(t.id, 40); });
+                }
+                return row;
+            });
+        }
+        return out;
     }
 
     /**
@@ -358,23 +396,17 @@
         } else {
             combined.peripheralCatalogAvailable = false;
         }
-        // execution 为 {failed, catalog}：拉取失败/畸形显式标记 failed（能力刷新据此保留旧注册），
-        // 目录本身缺失同样只标记不可用，两者都不伪造内容
+        // 执行目录有独立的有界传输/存储通道（配对 device.executionCatalog 与
+        // device.execution-catalog.read 任务），不占用能力载荷预算；这里只保留状态标记
         var executionCatalog = execution && execution.failed === false ? execution.catalog : null;
-        if (executionCatalog && typeof executionCatalog === 'object') {
-            combined.executionCatalog = executionCatalog;
-        } else {
-            combined.executionCatalogAvailable = false;
-            if (execution && execution.failed === true) {
-                combined.executionCatalogFailed = true;
-            }
+        combined.executionCatalogAvailable = !!executionCatalog;
+        if (execution && execution.failed === true) {
+            combined.executionCatalogFailed = true;
+        }
+        if (execution && execution.oversize === true) {
+            combined.executionCatalogOversize = true;
         }
         try {
-            if (_utf8Bytes(JSON.stringify(combined)) > MAX_CAPABILITIES_BYTES && combined.executionCatalog) {
-                delete combined.executionCatalog;
-                combined.executionCatalogAvailable = false;
-                combined.executionCatalogOversize = true;
-            }
             if (_utf8Bytes(JSON.stringify(combined)) > MAX_CAPABILITIES_BYTES) {
                 delete combined.peripheralCatalog;
                 combined.peripheralCatalogAvailable = false;
@@ -382,9 +414,7 @@
             }
         } catch (e) {
             delete combined.peripheralCatalog;
-            delete combined.executionCatalog;
             combined.peripheralCatalogAvailable = false;
-            combined.executionCatalogAvailable = false;
         }
         return combined;
     }
@@ -415,7 +445,9 @@
                 chipModel: chip.model || '',
                 firmwareVersion: (sys.device && sys.device.firmwareVersion) || '',
                 schemaVersion: SCHEMA_VERSION,
-                capabilities: _buildCapabilities(results[1], results[3], results[4])
+                capabilities: _buildCapabilities(results[1], results[3], results[4]),
+                // 执行目录独立有界传输（不占能力载荷预算；云端独立列存储）
+                executionCatalog: results[4] && results[4].failed === false ? results[4].catalog : null
             };
             if (!device.deviceId || !device.macAddress) {
                 return { ok: false, error: 'DEVICE_API_FAILED' };
@@ -450,9 +482,9 @@
             return _deviceGet('/api/device/info');
         },
         'device.capabilities.read': function () {
-            // 能力刷新同样携带外设类型目录（原始 body，有界）与执行目录，
-            // 供云端外设配置与外设执行规则校验使用；顶层附带当前固件版本，
-            // 云端据此把刷新结果写回注册并做目录新鲜度绑定
+            // 能力刷新携带外设类型目录（原始 body，有界）与执行目录状态标记；
+            // 执行目录本体经独立的 execution-catalog 任务通道（见下）；
+            // 顶层附带当前固件版本，云端据此把刷新结果写回注册并做目录新鲜度绑定
             return Promise.all([
                 _deviceGet('/api/system/capabilities'),
                 _deviceGetRaw('/api/peripherals/types').catch(function () { return null; }),
@@ -466,6 +498,14 @@
                     if (typeof fw === 'string' && fw) combined.firmwareVersion = fw;
                 }
                 return combined;
+            });
+        },
+        'device.execution-catalog.read': function () {
+            // 独立的执行目录读取任务：失败/畸形即明确 FAILED（云端据此保留旧注册），
+            // 结果受 MAX_EXEC_CATALOG_BYTES 有界约束
+            return _fetchExecutionCatalog().then(function (result) {
+                if (!result || result.failed) throw new Error('DEVICE_API_FAILED');
+                return result.catalog;
             });
         },
         'device.config.section.read': function (job) {
@@ -545,7 +585,9 @@
                         writeJob ? 'OUTCOME_UNKNOWN' : 'INVALID_ARGUMENT');
                 }
                 // 超限结果明确失败，不截断伪造成功；写后无法证明结果时保持 UNKNOWN。
-                if (json.length > MAX_RESULT_BYTES) {
+                // 执行目录任务有独立的有界上限（生产尺寸依据见 MAX_EXEC_CATALOG_BYTES 注释）
+                var limit = job.type === 'device.execution-catalog.read' ? MAX_EXEC_CATALOG_BYTES : MAX_RESULT_BYTES;
+                if (json.length > limit) {
                     return _submitResult(job.jobId, job.idempotencyKey, writeJob ? 'UNKNOWN' : 'FAILED', null,
                         writeJob ? 'OUTCOME_UNKNOWN' : 'RESULT_TOO_LARGE');
                 }

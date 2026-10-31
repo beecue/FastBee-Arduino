@@ -64,7 +64,8 @@ const ACTION_TYPES = {
 const CONTROLS = {
   success: true,
   data: {
-    gpio: [{ id: 'rule_1', name: '规则1', actionType: 0, enabled: true, actionCount: 1, targets: [], hasSystemAction: false, hasSetMode: false, pollTaskIndex: [] }],
+    gpio: [{ id: 'rule_1', name: '规则1', actionType: 0, enabled: true, actionCount: 1,
+      targetPeriphId: 'do1', targets: [{ id: 'do1' }], hasSystemAction: false, hasSetMode: false, pollTaskIndex: [] }],
     modbus: [], system: [], script: [], sensor: [], other: [],
   },
 };
@@ -582,8 +583,10 @@ test('pair sends the real execution catalog with device capabilities', async ({ 
   await pair(page);
   const calls = await page.evaluate(() => (window as any).cloudCalls);
   const pairCall = calls.find((c: any) => c.path === '/connector/v1/pair');
-  // 能力载荷必须携带真实 trigger/event/action 目录（云端外设执行规则工具的 schema 来源）
-  const exec = pairCall.body.device.capabilities.executionCatalog;
+  // 执行目录经独立的 device.executionCatalog 字段（不占能力载荷预算），能力只带状态标记
+  expect(pairCall.body.device.capabilities.executionCatalog).toBeUndefined();
+  expect(pairCall.body.device.capabilities.executionCatalogAvailable).toBe(true);
+  const exec = pairCall.body.device.executionCatalog;
   expect(exec.schemaVersion).toBe(1);
   expect(exec.firmwareVersion).toBe('1.2.3');
   expect(exec.configRevision).toBe('rev-a');
@@ -593,7 +596,8 @@ test('pair sends the real execution catalog with device capabilities', async ({ 
   expect(exec.actions[0].targetTypes).toEqual([12, 16, 17]);
   expect(exec.actions[1].valueSchema).toEqual({ kind: 'integer', min: 0, max: 65535,
     relaxedByReceivedValue: true, receivedValueAllowed: true });
-  expect(exec.controls.gpio[0].id).toBe('rule_1');
+  expect(exec.controls.gpio[0]).toEqual({ id: 'rule_1', actionType: 0, enabled: true,
+    targetPeriphId: 'do1', targets: [{ id: 'do1' }] });
   const apiCalls = await page.evaluate(() => (window as any).apiCalls);
   expect(apiCalls).toContain('/api/periph-exec/trigger-types');
   expect(apiCalls).toContain('/api/periph-exec/events/static');
@@ -612,13 +616,14 @@ test('pair proceeds without execution catalog when its endpoints fail and marks 
   expect(result.ok).toBe(true);
   const calls = await page.evaluate(() => (window as any).cloudCalls);
   const pairCall = calls.find((c: any) => c.path === '/connector/v1/pair');
-  expect(pairCall.body.device.capabilities.executionCatalog).toBeUndefined();
+  expect(pairCall.body.device.executionCatalog).toBeNull();
   expect(pairCall.body.device.capabilities.executionCatalogAvailable).toBe(false);
+  expect(pairCall.body.device.capabilities.executionCatalogFailed).toBe(true);
   // 外设目录不受影响
   expect(pairCall.body.device.capabilities.peripheralCatalog.data.gpio[0].value).toBe(12);
 });
 
-test('capabilities refresh job returns the execution catalog payload', async ({ page }) => {
+test('capabilities refresh job carries flags only; catalog travels on its own bounded job', async ({ page }) => {
   await setup(page);
   await pair(page);
   await page.evaluate(() => (window as any).FastBeeAiMcpConnector.start());
@@ -630,15 +635,28 @@ test('capabilities refresh job returns the execution catalog payload', async ({ 
   });
   await expect.poll(() => page.evaluate(() =>
     (window as any).cloudCalls.filter((c: any) => c.path.endsWith('/result')).length)).toBe(1);
-  const calls = await page.evaluate(() => (window as any).cloudCalls);
-  const result = calls.find((c: any) => c.path.endsWith('/result'));
+  let calls = await page.evaluate(() => (window as any).cloudCalls);
+  let result = calls.find((c: any) => c.path.endsWith('/result'));
   expect(result.body.status).toBe('SUCCEEDED');
-  expect(result.body.result.executionCatalog.triggerTypes).toHaveLength(4);
-  expect(result.body.result.executionCatalog.events).toHaveLength(2);
-  expect(result.body.result.executionCatalog.actions).toHaveLength(4);
-  expect(result.body.result.executionCatalog.configRevision).toBe('rev-a');
-  // 能力刷新顶层附带固件版本，供云端写回注册并做新鲜度绑定
+  // 能力刷新载荷只带状态标记与固件版本；目录本体不占用该载荷
+  expect(result.body.result.executionCatalog).toBeUndefined();
+  expect(result.body.result.executionCatalogAvailable).toBe(true);
   expect(result.body.result.firmwareVersion).toBe('1.2.3');
+
+  // 独立的执行目录任务：有界载荷返回完整目录
+  await page.evaluate(() => {
+    (window as any).pendingPolls.shift()([
+      { jobId: 'job-exec-cat', type: 'device.execution-catalog.read', idempotencyKey: 'k-exec', deadlineAt: Date.now() + 60_000, leaseExpiresAt: Date.now() + 60_000 },
+    ]);
+  });
+  await expect.poll(() => page.evaluate(() =>
+    (window as any).cloudCalls.filter((c: any) => c.path.includes('job-exec-cat')).length)).toBe(1);
+  calls = await page.evaluate(() => (window as any).cloudCalls);
+  result = calls.find((c: any) => c.path.includes('job-exec-cat'));
+  expect(result.body.status).toBe('SUCCEEDED');
+  expect(result.body.result.configRevision).toBe('rev-a');
+  expect(result.body.result.actions).toHaveLength(4);
+  expect(result.body.result.controls.gpio[0].id).toBe('rule_1');
 });
 
 test('malformed or duplicate catalog rows drop the whole execution catalog', async ({ page }) => {
@@ -653,7 +671,7 @@ test('malformed or duplicate catalog rows drop the whole execution catalog', asy
   await pair(page);
   let calls = await page.evaluate(() => (window as any).cloudCalls);
   let pairCall = calls.find((c: any) => c.path === '/connector/v1/pair');
-  expect(pairCall.body.device.capabilities.executionCatalog).toBeUndefined();
+  expect(pairCall.body.device.executionCatalog).toBeNull();
   expect(pairCall.body.device.capabilities.executionCatalogAvailable).toBe(false);
 });
 
@@ -683,16 +701,19 @@ test('action catalog without firmware metadata or with duplicate values is rejec
   expect(pairCall.body.device.capabilities.executionCatalogAvailable).toBe(false);
 });
 
-test('oversize drops the execution catalog before the peripheral catalog', async ({ page }) => {
+test('oversize execution catalog is dropped from its own bounded channel without touching capabilities', async ({ page }) => {
   await setup(page);
-  // 执行目录超大而外设目录很小：超限必须先放弃执行目录，外设目录保留
-  // （每条行都在单独形状限制内，总量超过能力字节预算）
+  // 控制目录超界：事件/触发类型已裁剪展示名，超限压力来自控制行目标引用
   await page.evaluate(() => {
     const w = window as any;
-    const big = structuredClone(w.STATIC_EVENTS);
-    const pad = '事件名称填充汉字填充事件'.repeat(7); // 91 字符，低于单行 128 上限
-    for (let i = 0; i < 126; i++) big.data.push({ id: 'pad_' + i, name: pad, category: '系统', type: 70 });
-    w.STATIC_EVENTS = big;
+    const big = structuredClone(w.CONTROLS);
+    const targets = [];
+    for (let j = 0; j < 90; j++) targets.push({ id: 'target_peripheral_pad_' + String(j).padStart(8, '0') });
+    for (let i = 0; i < 95; i++) {
+      big.data.gpio.push({ id: 'rule_pad_' + String(i).padStart(6, '0'), name: 'x', actionType: 0,
+        enabled: true, actionCount: 1, targets: targets, hasSystemAction: false, hasSetMode: false, pollTaskIndex: [] });
+    }
+    w.CONTROLS = big;
   });
   const result = await page.evaluate(async (cloud: string) => {
     return await (window as any).FastBeeAiMcpConnector.pair(cloud, 'ABCD234567');
@@ -701,10 +722,42 @@ test('oversize drops the execution catalog before the peripheral catalog', async
   const calls = await page.evaluate(() => (window as any).cloudCalls);
   const pairCall = calls.find((c: any) => c.path === '/connector/v1/pair');
   const capabilities = pairCall.body.device.capabilities;
-  expect(capabilities.executionCatalog).toBeUndefined();
+  expect(pairCall.body.device.executionCatalog).toBeNull();
   expect(capabilities.executionCatalogAvailable).toBe(false);
   expect(capabilities.executionCatalogOversize).toBe(true);
   expect(capabilities.peripheralCatalog.data.gpio[0].value).toBe(12);
+});
+
+test('near-maximum production-size catalog round-trips intact through the bounded channel', async ({ page }) => {
+  await setup(page);
+  // 接近生产上界的目录：41 动作（完整 valueSchema）+ 32 条控制（设备 profile 上限）各带 4 个目标
+  await page.evaluate(() => {
+    const w = window as any;
+    const big = structuredClone(w.CONTROLS);
+    for (let i = 0; i < 32; i++) {
+      big.data.gpio.push({ id: 'rule_near_max_' + String(i).padStart(16, '0'), name: '规则',
+        actionType: 0, enabled: true, actionCount: 4, targetPeriphId: 'do1',
+        targets: [{ id: 'do1' }, { id: 'pwm1' }, { id: 'i2c1' }, { id: 'modbus1' }],
+        hasSystemAction: false, hasSetMode: false, pollTaskIndex: [] });
+    }
+    w.CONTROLS = big;
+    const acts = structuredClone(w.ACTION_TYPES);
+    for (let v = 11; v <= 40; v++) acts.data.actions.push({ value: v, name: 'ACTION_' + v,
+      requiresPeripheralTarget: true, targetTypes: [12, 16, 17],
+      valueSchema: { kind: 'nonempty-text', relaxedByReceivedValue: false, receivedValueAllowed: true } });
+    w.ACTION_TYPES = acts;
+  });
+  await pair(page);
+  const pairCall = (await page.evaluate(() => (window as any).cloudCalls))
+    .find((c: any) => c.path === '/connector/v1/pair');
+  const exec = pairCall.body.device.executionCatalog;
+  // 近上界目录完整往返：动作数量、控制行数、值 schema 均不丢
+  expect(exec.actions).toHaveLength(34);
+  expect(exec.controls.gpio).toHaveLength(33);
+  expect(exec.controls.gpio[1].targets).toHaveLength(4);
+  expect(exec.actions[1].valueSchema.kind).toBe('integer');
+  expect(pairCall.body.device.capabilities.executionCatalogAvailable).toBe(true);
+  expect(pairCall.body.device.capabilities.executionCatalogOversize).toBeUndefined();
 });
 
 test('snapshot failure marks the execution catalog fetch as failed, not merely unavailable', async ({ page }) => {

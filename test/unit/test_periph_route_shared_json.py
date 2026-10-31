@@ -22,7 +22,7 @@ SIGNATURES = ("void writeRuleCandidate(", "String PeriphExecRouteHandler::serial
               "void PeriphExecRouteHandler::handlePreflightRuleJson(",
               "void PeriphExecRouteHandler::handleImportChunk(",
               "void PeriphExecRouteHandler::handleRunOnce(")
-ORACLE_SHA256 = "8a5cf9094517c17815dcc4bc75bb334675b931f3a4276a829feb36504191ed2e"
+ORACLE_SHA256 = "54a4d09b46bbc002db3a140ae6dd764c99faa718818f2c512404ceb324e574df"
 
 
 def shared_writers(source, old):
@@ -49,7 +49,7 @@ def route_program(source, old, current, shared, harness, ordinary):
     support = "\n".join(line for line in source.splitlines() if line.startswith("constexpr ") and
                         "PERIPH_EXEC_" in line)
     support += "\n\n" + "\n\n".join(definition(source, signature) for signature in (
-        "uint32_t intervalSecondsFromInput(", "static int jsonInt(", "bool parseStrictLong(",
+        "uint32_t intervalSecondsFromInput(", "static int jsonInt(",
         "bool parseClockTime(", "bool actionNeedsPeripheral(", "bool actionTargetMatches(",
         "const char* asyncExecStatusName(", "bool asyncExecStatusIsTerminal(", "int runOnceRejectionStatus("))
     support += "\n\n" + definition(source, "void PeriphExecRouteHandler::parseRuleFromJson(").replace(

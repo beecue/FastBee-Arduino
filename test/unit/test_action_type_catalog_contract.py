@@ -60,6 +60,21 @@ int main() {
     if (FastBee::parseDacActionValue("256", 3, dac)) return 4;
     long ignored = 0;
     if (!FastBee::parseStrictActionLong("60000", 5, ignored)) return 5;
+    // 共享校验器的生产边界：PWM/DAC/闪烁、Modbus 写、UART 命令、poll/ctrl 条目
+    if (FastBee::validateRuleActionValue(4, "65535", false)) return 6;
+    if (!FastBee::validateRuleActionValue(4, "65536", false)) return 7;
+    if (!FastBee::validateRuleActionValue(2, "49", false)) return 8;
+    if (FastBee::validateRuleActionValue(16, "2:on", false)) return 9;
+    if (!FastBee::validateRuleActionValue(16, "2:maybe", false)) return 10;
+    if (FastBee::validateRuleActionValue(17, "100:42", false)) return 11;
+    if (!FastBee::validateRuleActionValue(17, "addr:xx", false)) return 12;
+    if (FastBee::validateRuleActionValue(18, "{\"ctrl\":[{\"d\":0,\"a\":\"pwm\",\"v\":10}]}", false)) return 13;
+    if (!FastBee::validateRuleActionValue(18, "{\"ctrl\":[{\"a\":\"pwm\"}]}", false)) return 14;
+    if (FastBee::validateRuleActionValue(29, "{\"action\":\"send\",\"value\":\"hi\"}", false)) return 15;
+    if (!FastBee::validateRuleActionValue(29, "{\"action\":\"exec\"}", false)) return 16;
+    if (FastBee::validateRuleActionValue(24, "12:30", false)) return 17;
+    if (!FastBee::validateRuleActionValue(24, "", false)) return 18;
+    if (!FastBee::validateRuleActionValue(34, "", true)) return 19;  // 禁止接收值替换
     return 0;
 }
 '''
@@ -164,32 +179,43 @@ class ActionTypeCatalogContractTests(unittest.TestCase):
         self.assertEqual(self.actions[10]['targetTypes'], [])
 
     def test_value_schemas_match_production_preflight(self):
-        # 每个动作都有生产值 schema，kind 限定已知集合
-        kinds = {'none', 'any', 'integer', 'nonempty-text', 'empty-only', 'enum', 'json-object', 'json-poll'}
+        # 每个动作都有生产值 schema，kind 限定已知集合；所列动作不允许 any
+        kinds = {'none', 'integer', 'nonempty-text', 'empty-only', 'enum', 'json-object', 'json-poll',
+                 'modbus-coil', 'modbus-reg', 'uart-command'}
         for value in self.actions:
             self.assertIn(value, self.schemas, f'action {value} missing valueSchema')
-            self.assertIn(self.schemas[value]['kind'], kinds)
-        # 生产 preflight 边界（PeriphExecRouteHandler 内联校验）与描述符一致
+        for value in (10, 16, 17, 18, 24, 25, 27, 28, 29):
+            self.assertIn(self.schemas[value]['kind'], kinds, f'action {value} must not accept any')
+        # 生产 preflight 边界与描述符一致（共享实现见下方同源断言）
         self.assertEqual(self.schemas[2]['kind'], 'integer')
         self.assertEqual(self.schemas[2]['rest'][:2], ['50', '60000'])
         self.assertEqual(self.schemas[4]['rest'][:2], ['0', '65535'])
         self.assertEqual(self.schemas[5]['rest'][:2], ['0', '255'])
-        self.assertIn('numeric < 50 || numeric > 60000', ROUTE_CPP)
-        self.assertIn('between 0 and 65535', ROUTE_CPP)
-        self.assertIn('parseDacActionValue', ROUTE_CPP)
-        # 枚举/空值/脚本契约
         self.assertEqual(self.schemas[15]['kind'], 'nonempty-text')
         self.assertEqual(self.schemas[31]['kind'], 'enum')
         self.assertIn('webServer,mdns', self.schemas[31]['rest'])
         self.assertEqual(self.schemas[35]['kind'], 'enum')
         self.assertIn('start,stop', self.schemas[35]['rest'])
         self.assertEqual(self.schemas[34]['kind'], 'empty-only')
+        self.assertEqual(self.schemas[16]['kind'], 'modbus-coil')
+        self.assertEqual(self.schemas[17]['kind'], 'modbus-reg')
+        self.assertEqual(self.schemas[29]['kind'], 'uart-command')
+        self.assertEqual(self.schemas[18]['kind'], 'json-poll')
+        self.assertEqual(self.schemas[19]['kind'], 'json-object')
         # RTC/SD/受限远程读禁止 useReceivedValue（生产 validateRtcAction/validateSdStatusAction）
         for value in (34, 35, 36, 37, 38):
             self.assertEqual(self.schemas[value]['rest'][-1], '0', f'action {value} must forbid received value')
-        # Modbus 轮询/传感器读取的 JSON 形态
-        self.assertEqual(self.schemas[18]['kind'], 'json-poll')
-        self.assertEqual(self.schemas[19]['kind'], 'json-object')
+
+    def test_preflight_and_catalog_share_one_value_validator(self):
+        # 同源：生产 preflight 调用共享校验器，schema 常量不在路由内联平行定义
+        value_contract = (ROOT / 'include/core/ActionValueContract.h').read_text(encoding='utf-8')
+        self.assertIn('validateRuleActionValue', value_contract)
+        self.assertIn('describeActionValueSchema', value_contract)
+        self.assertIn('FastBee::validateRuleActionValue(', ROUTE_CPP)
+        for parallel in ('INVALID_EFFECT_INTERVAL", "error", path + ".actionValue",\n                         "Blink/breathe',
+                         'parseStrictLong(action.actionValue'):
+            self.assertNotIn(parallel, ROUTE_CPP)
+        self.assertNotIn('INVALID_DAC_VALUE", "error", path + ".actionValue",\n                         "DAC value', ROUTE_CPP)
 
     def test_route_is_read_only_and_authenticated(self):
         self.assertIn('"/api/periph-exec/action-types"', ROUTE_CPP)
