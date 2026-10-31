@@ -141,21 +141,27 @@ class AiMcpConnectorContractTests(unittest.TestCase):
         self.assertIn("'/api/periph-exec/trigger-types'", SOURCE)
         self.assertIn("'/api/periph-exec/events/static'", SOURCE)
         self.assertIn("'/api/periph-exec/action-types'", SOURCE)
+        self.assertIn("'/api/periph-exec/controls'", SOURCE)
+        self.assertIn("'/api/mcp/config/snapshot'", SOURCE)
         self.assertIn("_fetchExecutionCatalog", SOURCE)
         self.assertIn("executionCatalog", SOURCE)
         # 目录缺失/越界显式标记，云端失败关闭；超限时先放弃执行目录
         self.assertIn("executionCatalogAvailable", SOURCE)
         self.assertIn("executionCatalogOversize", SOURCE)
-        # 目录携带 schema/firmware 元数据（云端兼容性门禁与新鲜度绑定来源）
+        # 目录携带 schema/firmware/revision 元数据（云端兼容性门禁与新鲜度绑定来源）；
+        # 拉取失败/畸形显式标记 failed（能力刷新据此保留旧注册）
         self.assertIn("schemaVersion", SOURCE)
         self.assertIn("firmwareVersion", SOURCE)
+        self.assertIn("configRevision", SOURCE)
+        self.assertIn("executionCatalogFailed", SOURCE)
 
     def test_execution_catalog_rows_are_strictly_validated(self):
         # 畸形/重复目录行不得被接受：必填字段类型化非空、ID/类型值唯一，整体放弃而不是挑选部分行
-        for validator in ("_validTriggerTypes", "_validEvents", "_validActionTypes"):
+        for validator in ("_validTriggerTypes", "_validEvents", "_validActionTypes", "_validControls"):
             self.assertIn(validator, SOURCE)
         self.assertIn("seen[", SOURCE)  # 唯一性检查
         self.assertIn("requiresPeripheralTarget", SOURCE)
+        self.assertIn("valueSchema", SOURCE)  # 生产动作值 schema 行校验
         # 能力刷新附带固件版本供云端写回注册
         self.assertIn("'/api/system/info?brief=1'", SOURCE)
 

@@ -45,7 +45,21 @@ int main() {
                 std::printf(" %u", unsigned(type.as<unsigned>()));
         }
         std::printf("\n");
+        JsonObject schema = item["valueSchema"].as<JsonObject>();
+        std::printf("V %u %s", unsigned(item["value"].as<unsigned>()),
+                    schema["kind"].as<const char*>());
+        if (schema["min"].is<long>()) std::printf(" %ld", schema["min"].as<long>());
+        if (schema["max"].is<long>()) std::printf(" %ld", schema["max"].as<long>());
+        if (schema["values"].is<const char*>()) std::printf(" %s", schema["values"].as<const char*>());
+        std::printf(" %u %u\n", unsigned(schema["relaxedByReceivedValue"].as<bool>()),
+                    unsigned(schema["receivedValueAllowed"].as<bool>()));
     }
+    // 边界一致性：DAC 生产解析器与描述符区间必须一致
+    uint8_t dac = 0;
+    if (!FastBee::parseDacActionValue("255", 3, dac) || dac != 255) return 3;
+    if (FastBee::parseDacActionValue("256", 3, dac)) return 4;
+    long ignored = 0;
+    if (!FastBee::parseStrictActionLong("60000", 5, ignored)) return 5;
     return 0;
 }
 '''
@@ -93,6 +107,7 @@ class ActionTypeCatalogContractTests(unittest.TestCase):
             assert ran.returncode == 0, ran.stdout + ran.stderr
             cls.lines = ran.stdout.splitlines()
         cls.actions = {}
+        cls.schemas = {}
         cls.types = []
         cls.meta = None
         for line in cls.lines:
@@ -106,6 +121,11 @@ class ActionTypeCatalogContractTests(unittest.TestCase):
                     'name': parts[2],
                     'required': parts[3] == '1',
                     'targetTypes': [int(value) for value in parts[4:]],
+                }
+            elif parts[0] == 'V':
+                cls.schemas[int(parts[1])] = {
+                    'kind': parts[2],
+                    'rest': parts[3:],
                 }
 
     def test_catalog_covers_every_exec_action_type_with_enum_name(self):
@@ -123,8 +143,7 @@ class ActionTypeCatalogContractTests(unittest.TestCase):
         self.assertEqual(self.meta[0], 1)
         self.assertRegex(self.meta[1], r'^\d+\.\d+\.\d+$')
 
-    def test_target_types_match_production_predicates(self):
-        # 与 docs/generated-action-target-contracts.md 普通模式表一致（生产谓词直接证据）
+    def test_target_types_match_production_predicates(self):        # 与 docs/generated-action-target-contracts.md 普通模式表一致（生产谓词直接证据）
         expected = {
             0: [12, 16, 17], 1: [12, 16, 17], 2: [12, 17], 3: [16, 17],
             4: [16, 17, 41], 5: [27], 11: [45], 12: [42], 13: [12, 16, 17],
@@ -143,6 +162,34 @@ class ActionTypeCatalogContractTests(unittest.TestCase):
         # CALL_PERIPHERAL(10) 需要目标但目标匹配命令相关：不展开类型清单
         self.assertTrue(self.actions[10]['required'])
         self.assertEqual(self.actions[10]['targetTypes'], [])
+
+    def test_value_schemas_match_production_preflight(self):
+        # 每个动作都有生产值 schema，kind 限定已知集合
+        kinds = {'none', 'any', 'integer', 'nonempty-text', 'empty-only', 'enum', 'json-object', 'json-poll'}
+        for value in self.actions:
+            self.assertIn(value, self.schemas, f'action {value} missing valueSchema')
+            self.assertIn(self.schemas[value]['kind'], kinds)
+        # 生产 preflight 边界（PeriphExecRouteHandler 内联校验）与描述符一致
+        self.assertEqual(self.schemas[2]['kind'], 'integer')
+        self.assertEqual(self.schemas[2]['rest'][:2], ['50', '60000'])
+        self.assertEqual(self.schemas[4]['rest'][:2], ['0', '65535'])
+        self.assertEqual(self.schemas[5]['rest'][:2], ['0', '255'])
+        self.assertIn('numeric < 50 || numeric > 60000', ROUTE_CPP)
+        self.assertIn('between 0 and 65535', ROUTE_CPP)
+        self.assertIn('parseDacActionValue', ROUTE_CPP)
+        # 枚举/空值/脚本契约
+        self.assertEqual(self.schemas[15]['kind'], 'nonempty-text')
+        self.assertEqual(self.schemas[31]['kind'], 'enum')
+        self.assertIn('webServer,mdns', self.schemas[31]['rest'])
+        self.assertEqual(self.schemas[35]['kind'], 'enum')
+        self.assertIn('start,stop', self.schemas[35]['rest'])
+        self.assertEqual(self.schemas[34]['kind'], 'empty-only')
+        # RTC/SD/受限远程读禁止 useReceivedValue（生产 validateRtcAction/validateSdStatusAction）
+        for value in (34, 35, 36, 37, 38):
+            self.assertEqual(self.schemas[value]['rest'][-1], '0', f'action {value} must forbid received value')
+        # Modbus 轮询/传感器读取的 JSON 形态
+        self.assertEqual(self.schemas[18]['kind'], 'json-poll')
+        self.assertEqual(self.schemas[19]['kind'], 'json-object')
 
     def test_route_is_read_only_and_authenticated(self):
         self.assertIn('"/api/periph-exec/action-types"', ROUTE_CPP)

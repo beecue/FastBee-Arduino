@@ -214,11 +214,14 @@
 
     // ---------- 配对 ----------
 
-    // 执行目录端点（固件生产只读路由；云端外设执行规则工具的 trigger/event/action schema 来源）
+    // 执行目录端点（固件生产只读路由；云端外设执行规则工具的 trigger/event/action/controls schema 来源）
     var EXEC_TRIGGER_TYPES_PATH = '/api/periph-exec/trigger-types';
     var EXEC_EVENTS_PATH = '/api/periph-exec/events/static';
     var EXEC_ACTION_TYPES_PATH = '/api/periph-exec/action-types';
+    var EXEC_CONTROLS_PATH = '/api/periph-exec/controls';
+    var EXEC_SNAPSHOT_PATH = '/api/mcp/config/snapshot';
     var EXEC_CATALOG_SCHEMA_VERSION = 1;
+    var EXEC_CONTROL_GROUPS = ['gpio', 'modbus', 'system', 'script', 'sensor', 'other'];
 
     function _isNonBlankString(value, maxLen) {
         return typeof value === 'string' && value.length > 0 && value.length <= maxLen;
@@ -271,35 +274,61 @@
                     if (!_isUint8(row.targetTypes[j])) return false;
                 }
             }
+            var schema = row.valueSchema;
+            if (!schema || typeof schema !== 'object' || !_isNonBlankString(schema.kind, 32)
+                    || typeof schema.relaxedByReceivedValue !== 'boolean'
+                    || typeof schema.receivedValueAllowed !== 'boolean') return false;
             if (seen[row.value]) return false;
             seen[row.value] = true;
         }
         return true;
     }
 
+    // 控制目录（规则派生的面板控制项）：固定分组、每组数组、条目稳定 ID 非空且有界
+    function _validControls(data) {
+        if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+        var total = 0;
+        for (var g = 0; g < EXEC_CONTROL_GROUPS.length; g++) {
+            var group = data[EXEC_CONTROL_GROUPS[g]];
+            if (!Array.isArray(group)) return false;
+            for (var i = 0; i < group.length; i++) {
+                var item = group[i];
+                if (!item || !_isNonBlankString(item.id, 40)) return false;
+                total++;
+            }
+        }
+        return total <= 96;
+    }
+
     /**
-     * 读取设备执行目录（触发类型 + 静态事件 + 生产动作类型目录）。
-     * 三个子目录都必须通过严格形状校验（类型化必填字段、唯一 ID）；任一端点失败、
-     * 畸形或超界即视为目录整体不可用（返回 null，云端规则工具失败关闭），
-     * 绝不截断或编造部分目录。
+     * 读取设备执行目录（触发类型 + 静态事件 + 生产动作类型目录 + 控制目录 + 当前配置 revision）。
+     * 所有子目录都必须通过严格形状校验（类型化必填字段、唯一 ID）；任一端点失败或畸形即返回
+     * { failed: true }，绝不截断或编造部分目录——配对按目录缺失失败关闭，能力刷新据 failed
+     * 标记保留旧注册。
      */
     function _fetchExecutionCatalog() {
         return Promise.all([
             _deviceGet(EXEC_TRIGGER_TYPES_PATH).catch(function () { return null; }),
             _deviceGet(EXEC_EVENTS_PATH).catch(function () { return null; }),
-            _deviceGet(EXEC_ACTION_TYPES_PATH).catch(function () { return null; })
+            _deviceGet(EXEC_ACTION_TYPES_PATH).catch(function () { return null; }),
+            _deviceGet(EXEC_CONTROLS_PATH).catch(function () { return null; }),
+            _deviceGet(EXEC_SNAPSHOT_PATH).catch(function () { return null; })
         ]).then(function (results) {
-            if (!_validTriggerTypes(results[0]) || !_validEvents(results[1])
-                    || !_validActionTypes(results[2])) {
-                return null;
+            var snapshot = results[4];
+            var configRevision = snapshot && _isNonBlankString(snapshot.revision, 128) ? snapshot.revision : null;
+            if (!configRevision || !_validTriggerTypes(results[0]) || !_validEvents(results[1])
+                    || !_validActionTypes(results[2]) || !_validControls(results[3])) {
+                return { failed: true };
             }
-            return {
+            return { failed: false, catalog: {
                 schemaVersion: EXEC_CATALOG_SCHEMA_VERSION,
                 firmwareVersion: results[2].firmwareVersion,
+                configRevision: configRevision,
                 triggerTypes: results[0],
                 events: results[1],
-                actions: results[2].actions
-            };
+                actions: results[2].actions,
+                controls: results[3]
+            } };
         });
     }
 
@@ -329,10 +358,16 @@
         } else {
             combined.peripheralCatalogAvailable = false;
         }
-        if (execution && typeof execution === 'object') {
-            combined.executionCatalog = execution;
+        // execution 为 {failed, catalog}：拉取失败/畸形显式标记 failed（能力刷新据此保留旧注册），
+        // 目录本身缺失同样只标记不可用，两者都不伪造内容
+        var executionCatalog = execution && execution.failed === false ? execution.catalog : null;
+        if (executionCatalog && typeof executionCatalog === 'object') {
+            combined.executionCatalog = executionCatalog;
         } else {
             combined.executionCatalogAvailable = false;
+            if (execution && execution.failed === true) {
+                combined.executionCatalogFailed = true;
+            }
         }
         try {
             if (_utf8Bytes(JSON.stringify(combined)) > MAX_CAPABILITIES_BYTES && combined.executionCatalog) {

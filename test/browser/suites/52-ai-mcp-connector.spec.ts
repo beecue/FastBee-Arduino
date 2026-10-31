@@ -49,12 +49,27 @@ const ACTION_TYPES = {
     schemaVersion: 1,
     firmwareVersion: '1.2.3',
     actions: [
-      { value: 0, name: 'ACTION_HIGH', requiresPeripheralTarget: true, targetTypes: [12, 16, 17] },
-      { value: 6, name: 'ACTION_SYS_RESTART', requiresPeripheralTarget: false },
-      { value: 10, name: 'ACTION_CALL_PERIPHERAL', requiresPeripheralTarget: true },
+      { value: 0, name: 'ACTION_HIGH', requiresPeripheralTarget: true, targetTypes: [12, 16, 17],
+        valueSchema: { kind: 'none', relaxedByReceivedValue: false, receivedValueAllowed: true } },
+      { value: 4, name: 'ACTION_SET_PWM', requiresPeripheralTarget: true, targetTypes: [16, 17, 41],
+        valueSchema: { kind: 'integer', min: 0, max: 65535, relaxedByReceivedValue: true, receivedValueAllowed: true } },
+      { value: 6, name: 'ACTION_SYS_RESTART', requiresPeripheralTarget: false,
+        valueSchema: { kind: 'none', relaxedByReceivedValue: false, receivedValueAllowed: true } },
+      { value: 10, name: 'ACTION_CALL_PERIPHERAL', requiresPeripheralTarget: true,
+        valueSchema: { kind: 'any', relaxedByReceivedValue: false, receivedValueAllowed: true } },
     ],
   },
 };
+// 与固件 /api/periph-exec/controls 契约同形状的控制目录（分组原始行）
+const CONTROLS = {
+  success: true,
+  data: {
+    gpio: [{ id: 'rule_1', name: '规则1', actionType: 0, enabled: true, actionCount: 1, targets: [], hasSystemAction: false, hasSetMode: false, pollTaskIndex: [] }],
+    modbus: [], system: [], script: [], sensor: [], other: [],
+  },
+};
+// 与固件 /api/mcp/config/snapshot 契约同形状的全局 revision
+const MCP_SNAPSHOT = { success: true, data: { revision: 'rev-a', sections: {} } };
 
 // 与固件 /api/peripherals/types 契约同形状的外设类型目录
 const PERIPHERAL_TYPES = {
@@ -109,6 +124,14 @@ async function setup(page: any) {
       if (path === '/api/periph-exec/action-types') {
         if ((window as any).execCatalogFail) throw new Error('exec catalog down');
         return structuredClone((window as any).ACTION_TYPES);
+      }
+      if (path === '/api/periph-exec/controls') {
+        if ((window as any).execCatalogFail) throw new Error('exec catalog down');
+        return structuredClone((window as any).CONTROLS);
+      }
+      if (path === '/api/mcp/config/snapshot') {
+        if ((window as any).snapshotFail) throw new Error('snapshot down');
+        return structuredClone((window as any).MCP_SNAPSHOT);
       }
       if (path === '/api/device/config') return structuredClone((window as any).DEVICE_CONFIG);
       throw new Error('unexpected device api: ' + path);
@@ -169,8 +192,10 @@ async function setup(page: any) {
     w.TRIGGER_TYPES = fixtures.TRIGGER_TYPES;
     w.STATIC_EVENTS = fixtures.STATIC_EVENTS;
     w.ACTION_TYPES = fixtures.ACTION_TYPES;
+    w.CONTROLS = fixtures.CONTROLS;
+    w.MCP_SNAPSHOT = fixtures.MCP_SNAPSHOT;
   }, { DEVICE_INFO, SYSTEM_INFO, CAPABILITIES, DEVICE_CONFIG, PERIPHERAL_TYPES, TRIGGER_TYPES, STATIC_EVENTS,
-    ACTION_TYPES });
+    ACTION_TYPES, CONTROLS, MCP_SNAPSHOT });
 }
 
 async function pair(page: any) {
@@ -561,14 +586,20 @@ test('pair sends the real execution catalog with device capabilities', async ({ 
   const exec = pairCall.body.device.capabilities.executionCatalog;
   expect(exec.schemaVersion).toBe(1);
   expect(exec.firmwareVersion).toBe('1.2.3');
+  expect(exec.configRevision).toBe('rev-a');
   expect(exec.triggerTypes.map((t: any) => t.type)).toEqual([0, 1, 4, 5]);
   expect(exec.events.map((e: any) => e.id)).toEqual(['wifi_connected', 'system_boot']);
-  expect(exec.actions.map((a: any) => a.value)).toEqual([0, 6, 10]);
+  expect(exec.actions.map((a: any) => a.value)).toEqual([0, 4, 6, 10]);
   expect(exec.actions[0].targetTypes).toEqual([12, 16, 17]);
+  expect(exec.actions[1].valueSchema).toEqual({ kind: 'integer', min: 0, max: 65535,
+    relaxedByReceivedValue: true, receivedValueAllowed: true });
+  expect(exec.controls.gpio[0].id).toBe('rule_1');
   const apiCalls = await page.evaluate(() => (window as any).apiCalls);
   expect(apiCalls).toContain('/api/periph-exec/trigger-types');
   expect(apiCalls).toContain('/api/periph-exec/events/static');
   expect(apiCalls).toContain('/api/periph-exec/action-types');
+  expect(apiCalls).toContain('/api/periph-exec/controls');
+  expect(apiCalls).toContain('/api/mcp/config/snapshot');
 });
 
 test('pair proceeds without execution catalog when its endpoints fail and marks it unavailable', async ({ page }) => {
@@ -604,7 +635,8 @@ test('capabilities refresh job returns the execution catalog payload', async ({ 
   expect(result.body.status).toBe('SUCCEEDED');
   expect(result.body.result.executionCatalog.triggerTypes).toHaveLength(4);
   expect(result.body.result.executionCatalog.events).toHaveLength(2);
-  expect(result.body.result.executionCatalog.actions).toHaveLength(3);
+  expect(result.body.result.executionCatalog.actions).toHaveLength(4);
+  expect(result.body.result.executionCatalog.configRevision).toBe('rev-a');
   // 能力刷新顶层附带固件版本，供云端写回注册并做新鲜度绑定
   expect(result.body.result.firmwareVersion).toBe('1.2.3');
 });
@@ -673,4 +705,19 @@ test('oversize drops the execution catalog before the peripheral catalog', async
   expect(capabilities.executionCatalogAvailable).toBe(false);
   expect(capabilities.executionCatalogOversize).toBe(true);
   expect(capabilities.peripheralCatalog.data.gpio[0].value).toBe(12);
+});
+
+test('snapshot failure marks the execution catalog fetch as failed, not merely unavailable', async ({ page }) => {
+  await setup(page);
+  // revision 绑定读取失败：目录整体标记失败（供云端能力刷新保留旧注册），不伪造内容
+  await page.evaluate(() => { (window as any).snapshotFail = true; });
+  const result = await page.evaluate(async (cloud: string) => {
+    return await (window as any).FastBeeAiMcpConnector.pair(cloud, 'ABCD234567');
+  }, CLOUD);
+  expect(result.ok).toBe(true);
+  const calls = await page.evaluate(() => (window as any).cloudCalls);
+  const capabilities = calls.find((c: any) => c.path === '/connector/v1/pair').body.device.capabilities;
+  expect(capabilities.executionCatalog).toBeUndefined();
+  expect(capabilities.executionCatalogAvailable).toBe(false);
+  expect(capabilities.executionCatalogFailed).toBe(true);
 });

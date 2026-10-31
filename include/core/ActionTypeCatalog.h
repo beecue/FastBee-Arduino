@@ -2,8 +2,10 @@
 #define ACTION_TYPE_CATALOG_H
 
 #include <ArduinoJson.h>
+#include <cstring>
 #include "core/PeripheralActionContract.h"
 #include "core/PeripheralTypes.h"
+#include "core/ActionValueContract.h"
 #include "core/SystemConstants.h"
 
 // 生产动作类型目录：供 /api/periph-exec/action-types 与 MCP 配对能力载荷使用。
@@ -91,6 +93,19 @@ inline void writeActionTypeCatalog(JsonObject out) {
         item["name"] = actionTypeName(value);
         const bool required = PeripheralActionContract::requiresPeripheralTarget(value);
         item["requiresPeripheralTarget"] = required;
+        // 生产动作值 schema（与规则 preflight 的逐动作校验同一语义来源）
+        const ActionValueSchema schema = describeActionValueSchema(value);
+        JsonObject valueSchema = item["valueSchema"].to<JsonObject>();
+        valueSchema["kind"] = schema.kind;
+        if (std::strcmp(schema.kind, "integer") == 0) {
+            valueSchema["min"] = schema.minimum;
+            valueSchema["max"] = schema.maximum;
+        }
+        if (schema.allowedValues != nullptr) {
+            valueSchema["values"] = schema.allowedValues;
+        }
+        valueSchema["relaxedByReceivedValue"] = schema.relaxedByReceivedValue;
+        valueSchema["receivedValueAllowed"] = schema.receivedValueAllowed;
         if (!required || value == static_cast<uint8_t>(ExecActionType::ACTION_CALL_PERIPHERAL)) {
             continue;
         }
