@@ -80,6 +80,35 @@ class AiMcpConnectorContractTests(unittest.TestCase):
         for forbidden in ("/api/ota", "/api/system/restart", "/api/system/factory-reset", "/api/users"):
             self.assertNotIn(forbidden, SOURCE)
 
+    def test_mqtt_test_job_is_bounded_and_secret_free(self):
+        # 有界 MQTT 连接测试任务：固定路由、只携带草案引用与脱敏候选操作
+        self.assertIn("'device.mqtt.test'", SOURCE)
+        self.assertIn("'/api/mcp/mqtt/test'", SOURCE)
+        handler = re.search(r"'device\.mqtt\.test':\s*function\s*\(job\)\s*\{(.*?)\n        \}", SOURCE,
+                            re.DOTALL)
+        self.assertIsNotNone(handler, "missing device.mqtt.test handler")
+        body = handler.group(1)
+        self.assertIn("job.draftId", body)
+        self.assertIn("job.baseRevision", body)
+        self.assertIn("job.operations", body)
+        # 秘密绝不随任务载荷传输
+        for secret in ("password", "mqttSecret", "authCode"):
+            self.assertNotIn(secret, body)
+        # 有界轮询：间隔 + 上限 + 尊重任务截止时间，无自动重试循环
+        poll = re.search(r"function _pollMqttTest\(.*?\n    \}", SOURCE, re.DOTALL)
+        self.assertIsNotNone(poll, "missing _pollMqttTest")
+        pollBody = poll.group(0)
+        self.assertIn("MQTT_TEST_POLL_INTERVAL_MS", pollBody)
+        self.assertIn("MQTT_TEST_MAX_WAIT_MS", pollBody)
+        self.assertIn("MQTT_TEST_TIMEOUT", pollBody)
+        self.assertIn("deadlineAt", pollBody)
+        # 结果按真实结局表达：连接失败不等于成功
+        self.assertIn("MQTT_CONNECT_FAILED", pollBody)
+        # 启动响应必须有显式 started + 合法 testId
+        self.assertIn("data.started === true", SOURCE)
+        # 任务形状校验：draftId/baseRevision/operations 必填
+        self.assertRegex(SOURCE, r"job\.type === 'device\.mqtt\.test'")
+
     def test_leave_page_stops_polling_and_reports_state(self):
         self.assertIn("pagehide", SOURCE)
         self.assertIn("visibilitychange", SOURCE)

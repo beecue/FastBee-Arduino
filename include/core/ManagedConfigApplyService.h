@@ -50,6 +50,11 @@ public:
     virtual const char* const* dependencies(size_t& count) const = 0;
     virtual const char* const* secretFields(size_t& count) const = 0;
     virtual bool readOnly() const { return false; }
+    /**
+     * 读取未脱敏的当前值（仅限受控秘密恢复路径，如连接测试暂存与协议应用；
+     * 默认回落到脱敏读——无秘密分节两者等价）。
+     */
+    virtual bool readPlain(JsonDocument& output, String& error) { return readRedacted(output, error); }
     virtual bool writeSecret(const String& secretRef, const String& value, String& error) {
         (void)secretRef;
         (void)value;
@@ -82,6 +87,21 @@ public:
     String rollback(JsonVariantConst request, JsonDocument& output, String& error);
     bool storeSecret(const String& secretRef, const String& value,
                      const String& idempotencyKey, String& error);
+
+    /**
+     * 有界 MQTT 连接测试钩子（生产由 MqttRouteHandler 的暂存/恢复生命周期实现）：
+     * starter 暂存候选并触发一次性受控重建，返回测试 ID；reader 按测试 ID 读取
+     * finished/connected 等状态。测试永不持久化候选，秘密只来自设备本地配置。
+     */
+    typedef bool (*MqttTestStarter)(JsonVariantConst mqttCandidate, String& testId, String& error);
+    typedef bool (*MqttTestStatusReader)(const String& testId, JsonObject result, String& error);
+
+    bool mqttTest(JsonVariantConst request, JsonDocument& output, String& error);
+    bool mqttTestStatus(const String& testId, JsonDocument& output, String& error);
+    void setMqttTestHooks(MqttTestStarter starter, MqttTestStatusReader reader) {
+        mqttTestStarter_ = starter;
+        mqttTestStatusReader_ = reader;
+    }
 
 #ifndef UNIT_TEST
     void setProtocolManager(ProtocolManager* manager);
@@ -138,6 +158,8 @@ private:
     bool initialized_ = true;
     String unresolvedOperationId_;
     String manualRecoveryOperationId_;
+    MqttTestStarter mqttTestStarter_ = nullptr;
+    MqttTestStatusReader mqttTestStatusReader_ = nullptr;
     struct DefaultAdapters;
     DefaultAdapters* defaults_ = nullptr;
 

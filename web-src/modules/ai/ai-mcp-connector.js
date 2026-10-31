@@ -106,6 +106,11 @@
     function _validManagedResult(path, data) {
         if (!_isObject(data)) return false;
         if (path === '/api/mcp/config/preflight') return typeof data.allowed === 'boolean';
+        if (path === '/api/mcp/mqtt/test') {
+            // 启动响应：显式 started 标记 + 合法测试 ID；绝不接受无 ID 的"已启动"
+            return data.started === true && typeof data.testId === 'string'
+                && /^[A-Za-z0-9-]{1,64}$/.test(data.testId);
+        }
         if (typeof data.operationId !== 'string' || !/^[A-Za-z0-9-]{1,128}$/.test(data.operationId)) return false;
         if (!_validOperationState(data.state)) return false;
         if (data.state === 'FAILED' && !_definitiveDeviceRejection(data.error || data.code)) return false;
@@ -538,8 +543,44 @@
                 operationId: job.operationId, currentRevision: job.currentRevision,
                 approvalHash: job.approvalHash, idempotencyKey: job.deviceIdempotencyKey
             });
+        },
+        // 有界 MQTT 连接测试：启动暂存探测后按 testId 有界轮询状态（不含任何秘密值；
+        // 秘密由设备本地配置承载）。超时即失败，不自动重试、不自动重连循环。
+        'device.mqtt.test': function (job) {
+            return _devicePost('/api/mcp/mqtt/test', {
+                draftId: job.draftId, baseRevision: job.baseRevision, operations: job.operations
+            }).then(function (started) {
+                return _pollMqttTest(started.testId, job.deadlineAt, 0);
+            });
         }
     };
+
+    var MQTT_TEST_POLL_INTERVAL_MS = 1000;
+    // 设备测试窗口 20 秒 + 余量；绝不超出任务截止时间
+    var MQTT_TEST_MAX_WAIT_MS = 25000;
+
+    function _pollMqttTest(testId, deadlineAt, attempts) {
+        var now = Date.now();
+        var budget = typeof deadlineAt === 'number' ? deadlineAt - 2000 : now + MQTT_TEST_MAX_WAIT_MS;
+        if (now + MQTT_TEST_MAX_WAIT_MS < budget) budget = now + MQTT_TEST_MAX_WAIT_MS;
+        if (now >= budget) return Promise.reject(new Error('MQTT_TEST_TIMEOUT'));
+        return _deviceGet('/api/mcp/mqtt/test?testId=' + encodeURIComponent(testId)).then(function (data) {
+            if (!data || typeof data !== 'object') throw new Error('DEVICE_API_FAILED');
+            if (data.finished === true) {
+                var connected = data.connected === true && data.restoreBlocked !== true;
+                var result = { success: connected, connected: data.connected === true,
+                    finished: true, restoreBlocked: data.restoreBlocked === true };
+                if (!connected) result.code = 'MQTT_CONNECT_FAILED';
+                return result;
+            }
+            if (data.active !== true) throw new Error('DEVICE_API_FAILED');
+            return new Promise(function (resolve) {
+                setTimeout(resolve, MQTT_TEST_POLL_INTERVAL_MS);
+            }).then(function () {
+                return _pollMqttTest(testId, deadlineAt, attempts + 1);
+            });
+        });
+    }
 
     function _validateJob(job) {
         if (!job || typeof job !== 'object') return 'INVALID_ARGUMENT';
@@ -561,6 +602,9 @@
         }
         if (['device.config.preflight', 'device.config.apply'].indexOf(job.type) >= 0
                 && !Array.isArray(job.operations)) return 'INVALID_ARGUMENT';
+        if (job.type === 'device.mqtt.test'
+                && (!_isNonBlankString(job.draftId, 40) || !_isNonBlankString(job.baseRevision, 128)
+                        || !Array.isArray(job.operations))) return 'INVALID_ARGUMENT';
         return null;
     }
 

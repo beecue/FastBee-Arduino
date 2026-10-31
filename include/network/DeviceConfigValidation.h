@@ -64,4 +64,43 @@ inline const char* validateDeviceConfigPatch(JsonObjectConst obj) {
     // Each tab commits one file. Reject cross-file partial commits explicitly.
     return security && device ? "Save security policy separately from device settings" : nullptr;
 }
+
+/**
+ * MCP 受控写入的 device 分节完整候选校验（与 ConfigMigrationValidation 的设备契约一致）：
+ * 身份、产品、账号绑定、开发者模式与任何未知键必须与当前值完全一致；允许列表字段
+ * （deviceName/location/description/enableNTP/ntpServer1/ntpServer2/timezone/syncInterval/
+ * logLevel/cacheDuration）的差异部分走 validateDeviceConfigPatch 的生产边界
+ * （location 按迁移契约单独校验 ≤128 字符）。网络配置与 AI Key 不属于本分节。
+ */
+inline const char* validateDeviceSectionCandidate(JsonObjectConst candidate, JsonObjectConst current) {
+    if (candidate.isNull() || current.isNull()) return "MIGRATION_DEVICE_SCHEMA";
+    JsonDocument patch;
+    for (JsonPairConst entry : candidate) {
+        const char* key = entry.key().c_str();
+        if (entry.key().size() != std::strlen(key)) return "MIGRATION_DEVICE_SCHEMA";
+        bool allowed = false;
+        for (const char* name : {"deviceName", "location", "description", "enableNTP", "ntpServer1",
+                                 "ntpServer2", "timezone", "syncInterval", "logLevel", "cacheDuration"}) {
+            if (!std::strcmp(key, name)) {
+                allowed = true;
+                break;
+            }
+        }
+        if (!allowed) {
+            if (!current.containsKey(key) || current[key] != entry.value()) {
+                return "MIGRATION_IDENTITY_MUST_BE_PRESERVED";
+            }
+            continue;
+        }
+        if (!std::strcmp(key, "location")) {
+            const char* text = entry.value().as<const char*>();
+            if (!text || std::strlen(text) > 128) return "MIGRATION_DEVICE_SCHEMA";
+            continue;
+        }
+        patch[entry.key()] = entry.value();
+    }
+    if (patch.overflowed()) return "MIGRATION_MEMORY_PRESSURE";
+    if (patch.size() == 0) return nullptr;
+    return validateDeviceConfigPatch(patch.as<JsonObjectConst>());
+}
 } // namespace FastBee

@@ -9,6 +9,7 @@
 #include "core/ManagedConfigRevision.h"
 #include "core/ManagedConfigApplyService.h"
 #include "network/ProtocolConfigValidation.h"
+#include "network/DeviceConfigValidation.h"
 #include "network/SameOrigin.h"
 #include "../src/core/ManagedConfigRevision.cpp"
 #include "../src/core/ManagedConfigApplyService.cpp"
@@ -174,6 +175,15 @@ public:
         return true;
     }
 
+    bool readPlain(JsonDocument& output, String& error) override {
+        output.clear();
+        if (!output.set(state_)) {
+            error = "READ_FAILED";
+            return false;
+        }
+        return true;
+    }
+
     String name_;
     uint32_t schema_;
     bool readOnly_;
@@ -194,7 +204,7 @@ public:
 
 struct Fixture {
     Fixture() : service(false) {
-        for (FakeAdapter* adapter : {&features, &peripherals, &protocol, &rules, &exec, &network, &ai}) {
+        for (FakeAdapter* adapter : {&features, &peripherals, &protocol, &rules, &exec, &network, &ai, &device}) {
             adapter->lastOrder = &order;
             service.registerAdapter(adapter);
         }
@@ -210,6 +220,8 @@ struct Fixture {
         protocol.state_["password"] = "mqtt-secret";
         protocol.state_["server"] = "mqtt.local";
         protocol.secretFields_ = {"password"};
+        device.state_["deviceId"] = "FBE001122334455";
+        device.state_["deviceName"] = "fastbee";
     }
 
     FastBee::ManagedConfigApplyService service;
@@ -221,6 +233,7 @@ struct Fixture {
     FakeAdapter exec{"periphExec"};
     FakeAdapter network{"network", 1, true};
     FakeAdapter ai{"aiKey", 1, true};
+    FakeAdapter device{"device"};
 };
 
 String revision(Fixture& fixture) {
@@ -879,6 +892,232 @@ void test_operation_and_body_bounds_are_explicit() {
     TEST_ASSERT_FALSE(fixture.service.preflight(request, result, error));
     TEST_ASSERT_EQUAL_STRING("QUOTA_EXCEEDED", result["code"]);
 }
+
+// ---- Task 9 修复回归：device 分节候选校验（生产 DeviceConfigValidation 契约） ----
+
+void test_device_section_candidate_preserves_identity_and_enforces_bounds() {
+    JsonDocument current = parse("{\"deviceId\":\"FBE001122334455\",\"productNumber\":1,\"userId\":\"1\","
+                                 "\"deviceName\":\"old\",\"location\":\"\",\"enableNTP\":true,"
+                                 "\"syncInterval\":3600,\"logLevel\":\"INFO\",\"developerModeEnabled\":false}");
+    // 合法：允许字段变更
+    JsonDocument candidate = parse("{\"deviceId\":\"FBE001122334455\",\"productNumber\":1,\"userId\":\"1\","
+                                   "\"deviceName\":\"new-name\",\"location\":\"lab\",\"enableNTP\":true,"
+                                   "\"syncInterval\":600,\"logLevel\":\"DEBUG\",\"developerModeEnabled\":false}");
+    TEST_ASSERT_NULL(FastBee::validateDeviceSectionCandidate(candidate.as<JsonObjectConst>(),
+                                                             current.as<JsonObjectConst>()));
+    // 身份字段改变
+    JsonDocument identity;
+    identity.set(candidate);
+    identity["deviceId"] = "FBE999";
+    TEST_ASSERT_EQUAL_STRING("MIGRATION_IDENTITY_MUST_BE_PRESERVED",
+                             FastBee::validateDeviceSectionCandidate(identity.as<JsonObjectConst>(),
+                                                                     current.as<JsonObjectConst>()));
+    // 开发者模式不允许经此通道变更
+    JsonDocument devMode;
+    devMode.set(candidate);
+    devMode["developerModeEnabled"] = true;
+    TEST_ASSERT_EQUAL_STRING("MIGRATION_IDENTITY_MUST_BE_PRESERVED",
+                             FastBee::validateDeviceSectionCandidate(devMode.as<JsonObjectConst>(),
+                                                                     current.as<JsonObjectConst>()));
+    // 未知新键拒绝
+    JsonDocument unknown;
+    unknown.set(candidate);
+    unknown["hostname"] = "x";
+    TEST_ASSERT_EQUAL_STRING("MIGRATION_IDENTITY_MUST_BE_PRESERVED",
+                             FastBee::validateDeviceSectionCandidate(unknown.as<JsonObjectConst>(),
+                                                                     current.as<JsonObjectConst>()));
+    // 允许字段越界走生产边界
+    JsonDocument badInterval;
+    badInterval.set(candidate);
+    badInterval["syncInterval"] = 30;
+    TEST_ASSERT_EQUAL_STRING("Configuration integer out of range",
+                             FastBee::validateDeviceSectionCandidate(badInterval.as<JsonObjectConst>(),
+                                                                     current.as<JsonObjectConst>()));
+    JsonDocument badLevel;
+    badLevel.set(candidate);
+    badLevel["logLevel"] = "VERBOSE";
+    TEST_ASSERT_EQUAL_STRING("Invalid log level",
+                             FastBee::validateDeviceSectionCandidate(badLevel.as<JsonObjectConst>(),
+                                                                     current.as<JsonObjectConst>()));
+    // location 迁移契约上限 128
+    JsonDocument badLocation;
+    badLocation.set(candidate);
+    badLocation["location"] = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    TEST_ASSERT_EQUAL_STRING("MIGRATION_DEVICE_SCHEMA",
+                             FastBee::validateDeviceSectionCandidate(badLocation.as<JsonObjectConst>(),
+                                                                     current.as<JsonObjectConst>()));
+    // 与当前完全一致（无差异）：接受
+    TEST_ASSERT_NULL(FastBee::validateDeviceSectionCandidate(current.as<JsonObjectConst>(),
+                                                             current.as<JsonObjectConst>()));
+}
+
+void test_device_section_apply_roundtrip_through_pipeline() {
+    Fixture fixture;
+    JsonDocument body = applyBody(fixture,
+        "[{\"section\":\"device\",\"schemaVersion\":1,\"patch\":{\"deviceName\":\"new-name\",\"logLevel\":\"DEBUG\"}}]",
+        "device-apply");
+    JsonDocument result;
+    String error;
+    TEST_ASSERT_TRUE_MESSAGE(fixture.service.apply(body, result, error).isEmpty(), error.c_str());
+    TEST_ASSERT_EQUAL(1, fixture.device.applyCalls);
+    TEST_ASSERT_EQUAL_STRING("new-name", fixture.device.state_["deviceName"]);
+    // 身份字段保持（buildCandidate 顶层覆盖语义下未被触碰）
+    TEST_ASSERT_EQUAL_STRING("FBE001122334455", fixture.device.state_["deviceId"]);
+}
+
+// ---- Task 9 修复回归：有界 MQTT 连接测试（候选校验 + 秘密恢复 + 钩子） ----
+
+namespace {
+int g_starterCalls = 0;
+String g_starterPassword;
+bool g_starterFail = false;
+String g_starterError;
+
+bool fakeMqttStarter(JsonVariantConst candidate, String& testId, String& error) {
+    ++g_starterCalls;
+    g_starterPassword = candidate["password"].as<const char*>() ?: "";
+    if (g_starterFail) {
+        error = g_starterError;
+        return false;
+    }
+    testId = "test-1";
+    return true;
+}
+
+bool fakeMqttStatus(const String& testId, JsonObject data, String& error) {
+    (void)error;
+    if (testId != "test-1") return false;
+    data["finished"] = true;
+    data["connected"] = true;
+    return true;
+}
+
+JsonDocument mqttTestBody(Fixture& fixture, const char* mqttPatch) {
+    JsonDocument body;
+    body["draftId"] = "draft-mqtt-test";
+    body["baseRevision"] = revision(fixture);
+    String ops = String("[{\"section\":\"protocol\",\"schemaVersion\":1,\"patch\":{\"mqtt\":") + mqttPatch + "}}]";
+    body["operations"].set(parse(ops.c_str()));
+    return body;
+}
+
+void configureMqttState(Fixture& fixture) {
+    fixture.protocol.state_.clear();
+    JsonObject mqtt = fixture.protocol.state_["mqtt"].to<JsonObject>();
+    mqtt["enabled"] = true;
+    mqtt["server"] = "mqtt.local";
+    mqtt["port"] = 1883;
+    mqtt["password"] = "real-secret";
+    fixture.protocol.secretFields_ = {"password"};
+}
+} // namespace
+
+void test_mqtt_test_happy_path_restores_device_secret() {
+    Fixture fixture;
+    configureMqttState(fixture);
+    g_starterCalls = 0;
+    g_starterPassword = "";
+    g_starterFail = false;
+    fixture.service.setMqttTestHooks(&fakeMqttStarter, &fakeMqttStatus);
+    JsonDocument body = mqttTestBody(fixture,
+        "{\"enabled\":true,\"server\":\"mqtt.local\",\"port\":1883,\"password\":\"********\"}");
+    JsonDocument result;
+    String error;
+    TEST_ASSERT_TRUE_MESSAGE(fixture.service.mqttTest(body, result, error), error.c_str());
+    TEST_ASSERT_TRUE(result["success"]);
+    TEST_ASSERT_TRUE(result["data"]["started"]);
+    TEST_ASSERT_EQUAL_STRING("test-1", result["data"]["testId"]);
+    TEST_ASSERT_EQUAL(20000, result["data"]["timeoutMs"].as<int>());
+    TEST_ASSERT_EQUAL(1, g_starterCalls);
+    // 候选中的掩码秘密被设备本地真实值恢复，云端秘密绝不直接用于测试
+    TEST_ASSERT_EQUAL_STRING("real-secret", g_starterPassword.c_str());
+
+    JsonDocument status;
+    TEST_ASSERT_TRUE(fixture.service.mqttTestStatus("test-1", status, error));
+    TEST_ASSERT_TRUE(status["data"]["finished"]);
+    TEST_ASSERT_TRUE(status["data"]["connected"]);
+}
+
+void test_mqtt_test_rejects_raw_secret_revision_drift_and_disabled_candidate() {
+    Fixture fixture;
+    configureMqttState(fixture);
+    g_starterCalls = 0;
+    g_starterFail = false;
+    fixture.service.setMqttTestHooks(&fakeMqttStarter, &fakeMqttStatus);
+    JsonDocument result;
+    String error;
+
+    // 云端夹带明文秘密：SECRET_REQUIRED（秘密只能走设备本地秘密接口）
+    JsonDocument rawSecret = mqttTestBody(fixture,
+        "{\"enabled\":true,\"server\":\"mqtt.local\",\"port\":1883,\"password\":\"raw-secret\"}");
+    TEST_ASSERT_FALSE(fixture.service.mqttTest(rawSecret, result, error));
+    TEST_ASSERT_EQUAL_STRING("SECRET_REQUIRED", result["code"]);
+    TEST_ASSERT_EQUAL(0, g_starterCalls);
+
+    // revision 漂移：不启动测试
+    JsonDocument drifted = mqttTestBody(fixture, "{\"enabled\":true,\"server\":\"mqtt.local\",\"port\":1883}");
+    drifted["baseRevision"] = "stale-revision";
+    TEST_ASSERT_FALSE(fixture.service.mqttTest(drifted, result, error));
+    TEST_ASSERT_EQUAL_STRING("CONFIG_REVISION_CONFLICT", result["code"]);
+    TEST_ASSERT_EQUAL(0, g_starterCalls);
+
+    // 候选未启用 MQTT
+    JsonDocument disabled = mqttTestBody(fixture,
+        "{\"enabled\":false,\"server\":\"mqtt.local\",\"port\":1883}");
+    TEST_ASSERT_FALSE(fixture.service.mqttTest(disabled, result, error));
+    TEST_ASSERT_EQUAL_STRING("INVALID_ARGUMENT", result["code"]);
+    TEST_ASSERT_EQUAL(0, g_starterCalls);
+
+    // 未知请求字段拒绝
+    JsonDocument unknownField = mqttTestBody(fixture,
+        "{\"enabled\":true,\"server\":\"mqtt.local\",\"port\":1883}");
+    unknownField["url"] = "http://evil.example";
+    TEST_ASSERT_FALSE(fixture.service.mqttTest(unknownField, result, error));
+    TEST_ASSERT_EQUAL_STRING("INVALID_ARGUMENT", result["code"]);
+    TEST_ASSERT_EQUAL(0, g_starterCalls);
+}
+
+void test_mqtt_test_requires_hooks_and_maps_starter_failure() {
+    Fixture fixture;
+    configureMqttState(fixture);
+    g_starterCalls = 0;
+    JsonDocument result;
+    String error;
+    // 未注入钩子：CAPABILITY_UNSUPPORTED（生产装配缺失时失败关闭）
+    JsonDocument body = mqttTestBody(fixture, "{\"enabled\":true,\"server\":\"mqtt.local\",\"port\":1883}");
+    TEST_ASSERT_FALSE(fixture.service.mqttTest(body, result, error));
+    TEST_ASSERT_EQUAL_STRING("CAPABILITY_UNSUPPORTED", result["code"]);
+    TEST_ASSERT_FALSE(fixture.service.mqttTestStatus("test-1", result, error));
+    TEST_ASSERT_EQUAL_STRING("CAPABILITY_UNSUPPORTED", result["code"]);
+
+    // 启动器忙碌：映射 OPERATION_IN_PROGRESS，由云端有界等待/重试确认，不自动重连
+    fixture.service.setMqttTestHooks(&fakeMqttStarter, &fakeMqttStatus);
+    g_starterFail = true;
+    g_starterError = "OPERATION_IN_PROGRESS";
+    TEST_ASSERT_FALSE(fixture.service.mqttTest(body, result, error));
+    TEST_ASSERT_EQUAL_STRING("OPERATION_IN_PROGRESS", result["code"]);
+    // 启动器一般失败：DEVICE_CHANNEL_UNAVAILABLE
+    g_starterError = "";
+    TEST_ASSERT_FALSE(fixture.service.mqttTest(body, result, error));
+    TEST_ASSERT_EQUAL_STRING("DEVICE_CHANNEL_UNAVAILABLE", result["code"]);
+    g_starterFail = false;
+}
+
+void test_mqtt_test_rejects_non_protocol_operations() {
+    Fixture fixture;
+    configureMqttState(fixture);
+    g_starterCalls = 0;
+    fixture.service.setMqttTestHooks(&fakeMqttStarter, &fakeMqttStatus);
+    JsonDocument body;
+    body["draftId"] = "draft-mqtt-test";
+    body["baseRevision"] = revision(fixture);
+    body["operations"].set(parse("[{\"section\":\"features\",\"schemaVersion\":1,\"patch\":{}}]"));
+    JsonDocument result;
+    String error;
+    TEST_ASSERT_FALSE(fixture.service.mqttTest(body, result, error));
+    TEST_ASSERT_EQUAL_STRING("INVALID_ARGUMENT", result["code"]);
+    TEST_ASSERT_EQUAL(0, g_starterCalls);
+}
 } // namespace
 
 void test_mcp_config_apply_group() {
@@ -912,4 +1151,10 @@ void test_mcp_config_apply_group() {
     RUN_TEST(test_same_origin_rejects_cross_origin_mutation);
     RUN_TEST(test_nested_secret_values_require_secret_channel);
     RUN_TEST(test_operation_and_body_bounds_are_explicit);
+    RUN_TEST(test_device_section_candidate_preserves_identity_and_enforces_bounds);
+    RUN_TEST(test_device_section_apply_roundtrip_through_pipeline);
+    RUN_TEST(test_mqtt_test_happy_path_restores_device_secret);
+    RUN_TEST(test_mqtt_test_rejects_raw_secret_revision_drift_and_disabled_candidate);
+    RUN_TEST(test_mqtt_test_requires_hooks_and_maps_starter_failure);
+    RUN_TEST(test_mqtt_test_rejects_non_protocol_operations);
 }

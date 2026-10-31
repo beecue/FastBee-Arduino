@@ -31,6 +31,8 @@ private:
     void handleRecovery(AsyncWebServerRequest* request);
     void handleRollback(AsyncWebServerRequest* request);
     void handleSecret(AsyncWebServerRequest* request);
+    void handleMqttTest(AsyncWebServerRequest* request);
+    void handleMqttTestStatus(AsyncWebServerRequest* request);
     void sendDocument(AsyncWebServerRequest* request, JsonDocument& document, int status = 200);
 
     static constexpr size_t kMaxBodyBytes = 32768;

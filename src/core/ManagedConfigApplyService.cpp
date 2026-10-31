@@ -17,6 +17,7 @@
 #include "core/RuntimeFeatureManager.h"
 #include "network/ProtocolSecret.h"
 #include "network/ProtocolConfigValidation.h"
+#include "network/DeviceConfigValidation.h"
 #include "protocols/ProtocolManager.h"
 #include "systems/ConfigMigrationModbus.h"
 #include "systems/ConfigMigrationValidation.h"
@@ -85,6 +86,7 @@ int sectionRank(const char* section) {
     if (!std::strcmp(section, "protocol") || !std::strcmp(section, "modbus")) return 2;
     if (!std::strcmp(section, "ruleScripts")) return 3;
     if (!std::strcmp(section, "periphExec")) return 4;
+    if (!std::strcmp(section, "device")) return 5;
     return 5;
 }
 
@@ -272,6 +274,8 @@ public:
         count = secrets_.size();
         return secrets_.empty() ? nullptr : secrets_.data();
     }
+
+    bool readPlain(JsonDocument& output, String& error) override { return readRaw(output, error); }
 
 protected:
     virtual bool validateSection(JsonVariantConst, String&) { return true; }
@@ -643,6 +647,30 @@ protected:
     }
 };
 
+/**
+ * 设备信息分节（可写）：只允许展示/时间/日志字段经 MCP 草案变更；身份、产品、
+ * 账号绑定与开发者模式必须与当前值一致（生产 DeviceConfigValidation 契约）。
+ * 网络与 AI Key 保持只读适配器，不在此开放。
+ */
+class DeviceAdapter final : public StorageSectionAdapter {
+public:
+    DeviceAdapter() : StorageSectionAdapter("device", FileSystem::DEVICE_CONFIG_FILE, false, {}, {}) {}
+protected:
+    void setDefault(JsonDocument& output) override { output.to<JsonObject>(); }
+
+    bool validateSection(JsonVariantConst candidate, String& error) override {
+        JsonDocument current;
+        if (!readRaw(current, error)) return false;
+        const char* validation = FastBee::validateDeviceSectionCandidate(
+            candidate.as<JsonObjectConst>(), current.as<JsonObjectConst>());
+        if (validation) {
+            error = validation;
+            return false;
+        }
+        return true;
+    }
+};
+
 } // namespace
 
 struct ManagedConfigApplyService::DefaultAdapters {
@@ -653,6 +681,7 @@ struct ManagedConfigApplyService::DefaultAdapters {
     PeriphExecAdapter periphExec;
     NetworkAdapter network;
     AiKeyAdapter aiKey;
+    DeviceAdapter device;
 };
 
 void ManagedConfigApplyService::registerDefaultAdapters() {
@@ -663,6 +692,7 @@ void ManagedConfigApplyService::registerDefaultAdapters() {
     registerAdapter(&defaults_->periphExec);
     registerAdapter(&defaults_->network);
     registerAdapter(&defaults_->aiKey);
+    registerAdapter(&defaults_->device);
 }
 #else
 struct ManagedConfigApplyService::DefaultAdapters {};
@@ -675,7 +705,7 @@ ManagedConfigApplyService::ManagedConfigApplyService(bool registerDefaults) {
     if (registerDefaults) {
         defaults_ = new (std::nothrow) DefaultAdapters();
         if (defaults_) registerDefaultAdapters();
-        initialized_ = defaults_ && adapters_.size() == 7;
+        initialized_ = defaults_ && adapters_.size() == 8;
     }
 #else
     initialized_ = true;
@@ -1661,6 +1691,126 @@ bool ManagedConfigApplyService::storeSecret(const String& secretRef, const Strin
     }
     secrets_.push_back({idempotencyKey, requestHash});
     return true;
+}
+
+bool ManagedConfigApplyService::mqttTest(JsonVariantConst request, JsonDocument& output, String& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
+    output.clear();
+    if (!initialized_) return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, "MCP adapter allocation failed");
+    // 连接测试会临时暂存候选配置：存在结果不明/人工恢复屏障时禁止执行
+    if (checkUnknownGate(output, error) || checkManualRecoveryGate(output, error)) return false;
+    if (!request.is<JsonObjectConst>()) return fail(output, "INVALID_ARGUMENT", error, "request must be an object");
+    for (JsonPairConst field : request.as<JsonObjectConst>()) {
+        const String key = field.key().c_str();
+        if (key != "draftId" && key != "baseRevision" && key != "operations") {
+            return fail(output, "INVALID_ARGUMENT", error, "Unknown test field");
+        }
+    }
+    const char* draftId = request["draftId"] | "";
+    if (!*draftId || std::strlen(draftId) > 40) {
+        return fail(output, "INVALID_ARGUMENT", error, "Invalid draftId");
+    }
+    const char* baseRevision = request["baseRevision"] | "";
+    if (!*baseRevision) return fail(output, "INVALID_ARGUMENT", error, "Invalid baseRevision");
+    const String current = currentRevision(&error);
+    if (current.isEmpty()) return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, error.c_str());
+    if (current != baseRevision) {
+        return fail(output, "CONFIG_REVISION_CONFLICT", error, "CONFIG_REVISION_CONFLICT");
+    }
+    std::vector<Candidate> candidates;
+    if (!parseCandidates(request["operations"], candidates, output, error)) return false;
+    Candidate* protocol = nullptr;
+    for (auto& candidate : candidates) {
+        if (!std::strcmp(candidate.adapter->section(), "protocol")) {
+            protocol = &candidate;
+            continue;
+        }
+        clearCandidates(candidates);
+        return fail(output, "INVALID_ARGUMENT", error, "MQTT test accepts only protocol operations");
+    }
+    if (!protocol || protocol->deletion) {
+        clearCandidates(candidates);
+        return fail(output, "INVALID_ARGUMENT", error, "protocol candidate required");
+    }
+    if (!checkCandidate(*protocol, output, error)) {
+        clearCandidates(candidates);
+        return false;
+    }
+    JsonVariantConst mqtt = protocol->value["mqtt"];
+    if (!mqtt.is<JsonObjectConst>()) {
+        clearCandidates(candidates);
+        return fail(output, "INVALID_ARGUMENT", error, "MQTT subtree missing");
+    }
+    if (!(mqtt["enabled"] | false)) {
+        clearCandidates(candidates);
+        return fail(output, "INVALID_ARGUMENT", error, "MQTT disabled in candidate");
+    }
+    // 秘密只来自设备本地配置：候选中的掩码秘密用当前值恢复，云端值绝不直接使用
+    size_t secretCount = 0;
+    const char* const* secrets = protocol->adapter->secretFields(secretCount);
+    JsonDocument currentConfig;
+    if (!protocol->adapter->readPlain(currentConfig, error)) {
+        clearCandidates(candidates);
+        return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, error.c_str());
+    }
+    JsonDocument staged;
+    if (!staged.set(mqtt)) {
+        clearCandidates(candidates);
+        return fail(output, "QUOTA_EXCEEDED", error, "CAPACITY");
+    }
+    // mqtt 子树的秘密字段均为顶层键：仅掩码形态回填设备当前值
+    for (size_t i = 0; i < secretCount; ++i) {
+        JsonVariant field = staged[secrets[i]];
+        if (maskedSecret(field)) {
+            field.set(currentConfig["mqtt"][secrets[i]]);
+        }
+    }
+    if (staged.overflowed()) {
+        clearCandidates(candidates);
+        return fail(output, "QUOTA_EXCEEDED", error, "CAPACITY");
+    }
+    if (!mqttTestStarter_) {
+        clearCandidates(candidates);
+        return fail(output, "CAPABILITY_UNSUPPORTED", error, "MQTT test mechanism unavailable");
+    }
+    String testId;
+    if (!mqttTestStarter_(staged.as<JsonVariantConst>(), testId, error)) {
+        clearCandidates(candidates);
+        const String starterError = error;
+        const char* code = starterError == "OPERATION_IN_PROGRESS" ? "OPERATION_IN_PROGRESS"
+            : starterError == "SAVE_FAILED" ? "SAVE_FAILED" : "DEVICE_CHANNEL_UNAVAILABLE";
+        return fail(output, code, error,
+                    starterError.isEmpty() ? "MQTT test start failed" : starterError.c_str());
+    }
+    clearCandidates(candidates);
+    output["success"] = true;
+    JsonObject data = output["data"].to<JsonObject>();
+    data["started"] = true;
+    data["testId"] = testId;
+    // 有界窗口：连接成功或超时后由暂存/恢复生命周期自动恢复原配置，不自动重连循环
+    data["timeoutMs"] = 20000;
+    data["bounded"] = true;
+    return !output.overflowed() || fail(output, "QUOTA_EXCEEDED", error, "CAPACITY");
+}
+
+bool ManagedConfigApplyService::mqttTestStatus(const String& testId, JsonDocument& output, String& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    output.clear();
+    if (!initialized_) return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, "MCP adapter allocation failed");
+    if (testId.isEmpty() || testId.length() > 64) {
+        return fail(output, "INVALID_ARGUMENT", error, "Invalid testId");
+    }
+    if (!mqttTestStatusReader_) {
+        return fail(output, "CAPABILITY_UNSUPPORTED", error, "MQTT test status unavailable");
+    }
+    output["success"] = true;
+    JsonObject data = output["data"].to<JsonObject>();
+    if (!mqttTestStatusReader_(testId, data, error)) {
+        const String code = error.isEmpty() ? String("DEVICE_CHANNEL_UNAVAILABLE") : error;
+        return fail(output, code.c_str(), error, error.c_str());
+    }
+    return !output.overflowed() || fail(output, "QUOTA_EXCEEDED", error, "CAPACITY");
 }
 
 void ManagedConfigApplyService::clearCandidates(std::vector<Candidate>& candidates) {

@@ -3,11 +3,15 @@
 #include <cstring>
 #include <new>
 
+#include "core/FeatureFlags.h"
 #include "network/WebHandlerContext.h"
 #include "network/handlers/HandlerUtils.h"
 #include "network/SameOrigin.h"
 #include "protocols/ProtocolManager.h"
 #include "utils/PsramJsonDocument.h"
+#if FASTBEE_ENABLE_MQTT
+#include "network/handlers/MqttRouteHandler.h"
+#endif
 
 namespace {
 
@@ -31,6 +35,7 @@ int errorStatus(const String& code) {
         code == "PREFLIGHT_FAILED" || code == "CONFIRMATION_REQUIRED" ||
         code == "OPERATION_IN_PROGRESS") return 409;
     if (code == "OPERATION_NOT_FOUND") return 404;
+    if (code == "MQTT_TEST_NOT_FOUND") return 404;
     if (code == "QUOTA_EXCEEDED") return 413;
     if (code == "DEVICE_CHANNEL_UNAVAILABLE") return 503;
     if (code == "OUTCOME_UNKNOWN") return 200;
@@ -46,6 +51,12 @@ McpConfigRouteHandler::McpConfigRouteHandler(WebHandlerContext* ctx) : ctx_(ctx)
 void McpConfigRouteHandler::setupRoutes(AsyncWebServer* server) {
 #ifndef UNIT_TEST
     if (service_ && ctx_->protocolManager) service_->setProtocolManager(ctx_->protocolManager);
+#if FASTBEE_ENABLE_MQTT
+    if (service_) {
+        service_->setMqttTestHooks(&MqttRouteHandler::startMcpConnectionTest,
+                                   &MqttRouteHandler::mcpConnectionTestStatus);
+    }
+#endif
 #endif
     server->on(AsyncURIMatcher::exact("/api/mcp/capabilities"), HTTP_GET,
                [this](AsyncWebServerRequest* request) { handleCapabilities(request); });
@@ -83,6 +94,15 @@ void McpConfigRouteHandler::setupRoutes(AsyncWebServer* server) {
                       size_t index, size_t total) {
                    accumulateBody(request, data, len, index, total);
                });
+    // 有界 MQTT 连接测试：暂存候选 + 一次性受控重建，状态经 GET 按 testId 轮询
+    server->on(AsyncURIMatcher::exact("/api/mcp/mqtt/test"), HTTP_POST,
+               [this](AsyncWebServerRequest* request) { handleMqttTest(request); }, nullptr,
+               [this](AsyncWebServerRequest* request, uint8_t* data, size_t len,
+                      size_t index, size_t total) {
+                   accumulateBody(request, data, len, index, total);
+               });
+    server->on(AsyncURIMatcher::exact("/api/mcp/mqtt/test"), HTTP_GET,
+               [this](AsyncWebServerRequest* request) { handleMqttTestStatus(request); });
 }
 
 bool McpConfigRouteHandler::admit(AsyncWebServerRequest* request, bool heavy) {
@@ -252,6 +272,42 @@ void McpConfigRouteHandler::handleRollback(AsyncWebServerRequest* request) {
     auto output = FastBee::makeJsonDocument();
     String error;
     service_->rollback(input, output, error);
+    sendDocument(request, output, error.isEmpty() ? 200 : errorStatus(error));
+}
+
+void McpConfigRouteHandler::handleMqttTest(AsyncWebServerRequest* request) {
+    if (!admit(request, true)) return;
+    auto input = FastBee::makeJsonDocument();
+    if (!parseBody(request, input)) return;
+#ifndef UNIT_TEST
+#if FASTBEE_ENABLE_MQTT
+    // 覆盖管理器后初始化场景：每次请求前重新注入生产测试钩子
+    service_->setMqttTestHooks(&MqttRouteHandler::startMcpConnectionTest,
+                               &MqttRouteHandler::mcpConnectionTestStatus);
+#endif
+#endif
+    auto output = FastBee::makeJsonDocument();
+    String error;
+    service_->mqttTest(input.as<JsonVariantConst>(), output, error);
+    sendDocument(request, output, error.isEmpty() ? 200 : errorStatus(error));
+}
+
+void McpConfigRouteHandler::handleMqttTestStatus(AsyncWebServerRequest* request) {
+    if (!admit(request)) return;
+    const String testId = ctx_->getParamValue(request, "testId", "");
+    if (testId.isEmpty() || testId.length() > 64) {
+        ctx_->sendBadRequest(request, "Invalid testId");
+        return;
+    }
+#ifndef UNIT_TEST
+#if FASTBEE_ENABLE_MQTT
+    service_->setMqttTestHooks(&MqttRouteHandler::startMcpConnectionTest,
+                               &MqttRouteHandler::mcpConnectionTestStatus);
+#endif
+#endif
+    auto output = FastBee::makeJsonDocument();
+    String error;
+    service_->mqttTestStatus(testId, output, error);
     sendDocument(request, output, error.isEmpty() ? 200 : errorStatus(error));
 }
 

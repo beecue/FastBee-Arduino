@@ -7,6 +7,7 @@
 #include "./network/handlers/HandlerUtils.h"
 #include "./network/WebHandlerContext.h"
 #include "./network/NetworkManager.h"
+#include "network/ProtocolConfigValidation.h"
 #include "./protocols/ProtocolManager.h"
 #include "./protocols/MQTTClient.h"
 #include "protocols/MqttReportQueueStatus.h"
@@ -39,6 +40,14 @@ static std::atomic<bool> s_mqttTestJustRestored{false};
 static std::atomic<bool> s_mqttTestRestoreBlocked{false};
 static FastBee::MqttClientLifetime s_mqttTestGate;
 static String s_mqttTestId; // Accessed only under s_mqttTestGate.
+
+// MCP 连接测试（device.mqtt.test）的最近一次结局；仅在 s_mqttTestGate 下读写。
+struct McpMqttTestOutcome {
+    String testId;
+    bool finished = false;
+    bool connected = false;
+};
+static McpMqttTestOutcome s_mcpTestOutcome;
 
 // ============================================================================
 // 备份/恢复 MQTT 配置（测试连接不永久修改 protocol.json）
@@ -153,6 +162,7 @@ void MqttRouteHandler::checkPendingTestRestore() {
             s_mqttTestPendingRestore = false;
             s_mqttTestRestoreBlocked = false;
             s_mqttTestJustRestored = true;
+            s_mcpTestOutcome = {s_mqttTestId, true, s_mqttTestWasConnected.load()};
             if (fw && fw->getProtocolManager()) {
                 fw->getProtocolManager()->stopMQTT();
 
@@ -222,6 +232,121 @@ static bool saveMqttTestConfig(const String& server, int port, const String& use
 // ============================================================================
 // MQTT 测试辅助函数
 // ============================================================================
+
+// 暂存 MCP 候选 mqtt 子树（完整对象；秘密已由调用方从设备本地配置恢复）：
+// 先写恢复记录，再比较/替换 MQTT 子节点；候选绝不持久化为正式配置。
+static bool stageMqttTestConfig(JsonVariantConst candidateMqtt, String& testId) {
+    JsonDocument doc;
+    if (!ConfigStorage::getInstance().loadProtocolConfig(doc)) return false;
+    if (!doc["mqtt"].is<JsonObject>() || (doc["mqtt"]["connectionTestOnly"] | false)) return false;
+    JsonDocument candidate;
+    if (!candidate.set(candidateMqtt)) return false;
+    JsonObject mqtt = candidate.as<JsonObject>();
+    const uint32_t sequence = FastBee::nextReportInstanceId();
+    if (!sequence) return false;
+    testId = String(esp_random(), HEX) + "-" + String(sequence);
+    FastBee::setFixedJsonField(mqtt, "connectionTestOnly", true);
+    FastBee::setFixedJsonField(mqtt, "connectionTestId", testId);
+    FastBee::setFixedJsonField(mqtt, "enabled", true); // 仅本次显式临时探测，随后恢复
+    FastBee::setFixedJsonField(mqtt, "autoReconnect", true); // 探测必须尝试，即使常规自动重连关闭
+    if (candidate.overflowed() ||
+        !backupMqttConfig(doc["mqtt"].as<JsonVariantConst>(), candidate.as<JsonVariantConst>()))
+        return false;
+    return ConfigStorage::getInstance().compareExchangeMqttConfig(
+        doc["mqtt"].as<JsonVariantConst>(), candidate.as<JsonVariantConst>());
+}
+
+// 启动 MCP 受控连接测试：暂存候选 + 一次性受控重建；连接成功或超时（有界）后由
+// 主循环 checkPendingTestRestore 自动恢复原配置，不进入自动重连循环。
+bool MqttRouteHandler::startMcpConnectionTest(JsonVariantConst mqttCandidate, String& testId,
+                                              String& error) {
+    if (!mqttCandidate.is<JsonObjectConst>()) {
+        error = "INVALID_ARGUMENT";
+        return false;
+    }
+    if (!s_mqttTestGate.available()) {
+        error = "DEVICE_CHANNEL_UNAVAILABLE";
+        return false;
+    }
+    FastBee::MqttClientLifetime::Write testGuard(s_mqttTestGate);
+    if (!testGuard || s_mqttTestPendingRestore || LittleFS.exists(MQTT_TEST_BACKUP_PATH)) {
+        error = "OPERATION_IN_PROGRESS";
+        return false;
+    }
+    FastBeeFramework* fw = FastBeeFramework::getInstance();
+    ProtocolManager* pm = fw ? fw->getProtocolManager() : nullptr;
+    if (!pm) {
+        error = "DEVICE_CHANNEL_UNAVAILABLE";
+        return false;
+    }
+    // 生产契约校验（validateMqttCandidate）；enabled 候选前提由服务层先行保证
+    String validation;
+    if (!FastBee::validateMqttCandidate(mqttCandidate, validation)) {
+        error = validation.isEmpty() ? String("INVALID_ARGUMENT") : validation;
+        return false;
+    }
+    if (!(mqttCandidate["enabled"] | false)) {
+        error = "INVALID_ARGUMENT";
+        return false;
+    }
+    String stagedId;
+    if (!stageMqttTestConfig(mqttCandidate, stagedId)) {
+        error = "SAVE_FAILED";
+        return false;
+    }
+    s_mqttTestId = stagedId;
+    s_mqttTestPendingRestore = true;
+    s_mqttTestStartTime = millis();
+    s_mqttTestWasConnected = false;
+    s_mqttTestJustRestored = false;
+    s_mqttTestRestoreBlocked = false;
+    s_mcpTestOutcome = McpMqttTestOutcome();
+    pm->stopMQTT();
+    // 与"保存"按钮相同的重建路径；重建失败时已暂存配置仍由恢复窗口兜底恢复
+    FastBee::MqttRestartResult restartResult = FastBee::MqttRestartResult::NotStarted;
+    const bool deferred = pm->restartMQTTDeferred(true, &restartResult);
+    if (!deferred && restartResult != FastBee::MqttRestartResult::Deferred) {
+        error = "DEVICE_CHANNEL_UNAVAILABLE";
+        return false;
+    }
+    testId = stagedId;
+    return true;
+}
+
+bool MqttRouteHandler::mcpConnectionTestStatus(const String& testId, JsonObject data, String& error) {
+    if (!s_mqttTestGate.available()) {
+        error = "DEVICE_CHANNEL_UNAVAILABLE";
+        return false;
+    }
+    FastBee::MqttClientLifetime::Write testGuard(s_mqttTestGate);
+    if (!testGuard) {
+        error = "DEVICE_CHANNEL_UNAVAILABLE";
+        return false;
+    }
+    if (s_mqttTestPendingRestore && s_mqttTestId == testId) {
+        bool connected = false;
+        FastBeeFramework* fw = FastBeeFramework::getInstance();
+        if (fw && fw->getProtocolManager()) {
+            auto mqtt = fw->getProtocolManager()->acquireMQTTClient();
+            connected = mqtt && mqtt->isConnectionTestOnly() && mqtt->getConnectionTestId() == testId &&
+                        mqtt->getIsConnected() && !mqtt->isStopped();
+        }
+        FastBee::setFixedJsonField(data, "active", true);
+        FastBee::setFixedJsonField(data, "finished", false);
+        FastBee::setFixedJsonField(data, "connected", connected);
+        FastBee::setFixedJsonField(data, "restoreBlocked", s_mqttTestRestoreBlocked.load());
+        return true;
+    }
+    if (s_mcpTestOutcome.finished && s_mcpTestOutcome.testId == testId) {
+        FastBee::setFixedJsonField(data, "active", false);
+        FastBee::setFixedJsonField(data, "finished", true);
+        FastBee::setFixedJsonField(data, "connected", s_mcpTestOutcome.connected);
+        FastBee::setFixedJsonField(data, "restoreBlocked", false);
+        return true;
+    }
+    error = "MQTT_TEST_NOT_FOUND";
+    return false;
+}
 
 // scheme 参数版本：支持 mqtt/mqtts 协议选择
 static Client* selectMqttTestClient(WebHandlerContext* ctx, WiFiClient& fallbackClient,

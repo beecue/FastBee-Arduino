@@ -2,6 +2,7 @@
 #define MQTT_ROUTE_HANDLER_H
 
 #include <ESPAsyncWebServer.h>
+#include <ArduinoJson.h>
 
 class WebHandlerContext;
 
@@ -26,6 +27,16 @@ public:
      * 需要在主循环中周期调用。当测试连接成功或超时后，自动恢复原始MQTT配置。
      */
     static void checkPendingTestRestore();
+
+    /**
+     * @brief 启动 MCP 受控连接测试（device.mqtt.test）：暂存候选配置并触发一次性
+     * 受控重建；候选绝不持久化，连接成功或超时（有界）后自动恢复原配置，
+     * 不进入自动重连循环。秘密已在调用方由设备本地配置恢复。
+     */
+    static bool startMcpConnectionTest(JsonVariantConst mqttCandidate, String& testId, String& error);
+
+    /** @brief 按测试 ID 读取 MCP 连接测试状态（active/finished/connected/restoreBlocked）。 */
+    static bool mcpConnectionTestStatus(const String& testId, JsonObject data, String& error);
 
 private:
     WebHandlerContext* ctx;

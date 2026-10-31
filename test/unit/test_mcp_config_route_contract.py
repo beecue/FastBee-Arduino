@@ -148,6 +148,59 @@ class McpConfigRouteContractTests(unittest.TestCase):
             self.assertEqual(path, checks[name]["path"])
             self.assertEqual("GET", checks[name]["method"])
 
+    def test_device_section_adapter_is_writable_and_reuses_production_validation(self):
+        source = read(SERVICE_CPP)
+        # 可写 device 适配器复用生产 DeviceConfigValidation 候选校验
+        body = function_body(source, r"class DeviceAdapter")
+        self.assertIn('"device"', body)
+        self.assertIn("FileSystem::DEVICE_CONFIG_FILE", body)
+        self.assertIn("false", body)  # readOnly=false（网络/AI Key 保持只读）
+        self.assertIn("validateDeviceSectionCandidate", body)
+        # 生产校验头实现身份保留与允许列表
+        validation = read(ROOT / "include/network/DeviceConfigValidation.h")
+        self.assertIn("validateDeviceSectionCandidate", validation)
+        self.assertIn("MIGRATION_IDENTITY_MUST_BE_PRESERVED", validation)
+        self.assertIn("validateDeviceConfigPatch", validation)
+        for field in ("deviceName", "location", "description", "enableNTP", "ntpServer1",
+                      "ntpServer2", "timezone", "syncInterval", "logLevel", "cacheDuration"):
+            self.assertIn(f'"{field}"', validation)
+        # 注册并计入默认适配器数
+        self.assertIn("registerAdapter(&defaults_->device)", source)
+        self.assertIn("adapters_.size() == 8", source)
+        # 网络与 AI Key 保持只读
+        self.assertIn('StorageSectionAdapter("network", FileSystem::NETWORK_CONFIG_FILE, true', source)
+        self.assertIn('StorageSectionAdapter("aiKey", "", true', source)
+
+    def test_mqtt_test_route_is_bounded_and_uses_production_lifecycle(self):
+        handler = read(HANDLER_CPP)
+        self.assertIn('"/api/mcp/mqtt/test"', handler)
+        self.assertIn("handleMqttTest", handler)
+        self.assertIn("handleMqttTestStatus", handler)
+        self.assertIn("setMqttTestHooks", handler)
+        body = function_body(handler, r"McpConfigRouteHandler::handleMqttTest\s*\(")
+        self.assertIn("admit(request, true)", body)
+        service = read(SERVICE_CPP)
+        mqtt_test = function_body(service, r"ManagedConfigApplyService::mqttTest\s*\(")
+        # 屏障门控 + revision 绑定 + 秘密只来自设备本地配置 + 单协议分节限制
+        self.assertIn("checkUnknownGate", mqtt_test)
+        self.assertIn("checkManualRecoveryGate", mqtt_test)
+        self.assertIn("CONFIG_REVISION_CONFLICT", mqtt_test)
+        self.assertIn("maskedSecret", mqtt_test)
+        self.assertIn("readPlain", mqtt_test)
+        self.assertIn("MQTT test accepts only protocol operations", mqtt_test)
+        # 生产测试生命周期：暂存/恢复机制 + 受控重建，无自动重连循环
+        routes = read(ROOT / "src/network/handlers/MqttRouteHandler.cpp")
+        starter = function_body(routes, r"MqttRouteHandler::startMcpConnectionTest\s*\(")
+        self.assertIn("validateMqttCandidate", starter)
+        self.assertIn("backupMqttConfig", routes)
+        self.assertIn("restartMQTTDeferred", starter)
+        self.assertIn("compareExchangeMqttConfig", routes)
+        self.assertNotIn("while", starter)
+        status = function_body(routes, r"MqttRouteHandler::mcpConnectionTestStatus\s*\(")
+        self.assertIn("MQTT_TEST_NOT_FOUND", status)
+        # 恢复结局按 testId 记录
+        self.assertIn("s_mcpTestOutcome = {s_mqttTestId", routes)
+
 
 if __name__ == "__main__":
     unittest.main()
