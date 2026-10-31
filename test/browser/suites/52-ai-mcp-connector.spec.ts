@@ -481,3 +481,26 @@ test('capabilities refresh job returns the combined bounded catalog payload', as
   expect(result.body.result.mqtt).toBe(true);
   expect(result.body.result.peripheralCatalog.data.gpio[0].name).toBe('Digital Output');
 });
+
+test('multibyte catalog oversize drops the catalog by UTF-8 bytes without pairing rejection', async ({ page }) => {
+  await setup(page);
+  // 多字节目录：UTF-16 长度低于上限但 UTF-8 字节数超限；必须按字节口径放弃目录，
+  // 且配对不被拒绝（云端按目录缺失失败关闭，不产生注册拒绝）
+  await page.evaluate(() => {
+    const w = window as any;
+    const big = structuredClone(w.PERIPHERAL_TYPES);
+    const cjk = '温度传感器汉字填充'.repeat(600); // 10 字 × 600 ≈ UTF-16 6000 字符 / UTF-8 18000 字节
+    big.data.gpio[0].name = cjk;
+    w.PERIPHERAL_TYPES = big;
+  });
+  const result = await page.evaluate(async (cloud: string) => {
+    return await (window as any).FastBeeAiMcpConnector.pair(cloud, 'ABCD234567');
+  }, CLOUD);
+  expect(result.ok).toBe(true);
+  const calls = await page.evaluate(() => (window as any).cloudCalls);
+  const pairCall = calls.find((c: any) => c.path === '/connector/v1/pair');
+  const capabilities = pairCall.body.device.capabilities;
+  expect(capabilities.peripheralCatalog).toBeUndefined();
+  expect(capabilities.peripheralCatalogAvailable).toBe(false);
+  expect(capabilities.peripheralCatalogOversize).toBe(true);
+});

@@ -216,8 +216,8 @@
 
     /**
      * 组合系统编译能力与外设类型目录（/api/peripherals/types，云端外设配置工具的 schema 来源）。
-     * 目录读取失败时返回不含目录的能力并显式标记；组合 JSON 超过有界上限时放弃目录而不是
-     * 截断伪造，云端外设工具在目录缺失时保持失败关闭。
+     * 目录读取失败时返回不含目录的能力并显式标记；组合 JSON 按 UTF-8 字节数（与云端存储口径一致，
+     * 不用 UTF-16 长度）超过有界上限时放弃目录而不是截断伪造，云端外设工具在目录缺失时保持失败关闭。
      */
     function _buildCapabilities(sysCaps, catalog) {
         if (!sysCaps && !catalog) return null;
@@ -233,7 +233,11 @@
             combined.peripheralCatalogAvailable = false;
         }
         try {
-            if (JSON.stringify(combined).length > MAX_CAPABILITIES_BYTES) {
+            var json = JSON.stringify(combined);
+            var bytes = (typeof TextEncoder === 'function')
+                ? new TextEncoder().encode(json).length
+                : unescape(encodeURIComponent(json)).length;
+            if (bytes > MAX_CAPABILITIES_BYTES) {
                 delete combined.peripheralCatalog;
                 combined.peripheralCatalogAvailable = false;
                 combined.peripheralCatalogOversize = true;

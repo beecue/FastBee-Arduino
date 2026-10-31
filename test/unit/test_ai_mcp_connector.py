@@ -132,6 +132,8 @@ class AiMcpConnectorContractTests(unittest.TestCase):
         self.assertLessEqual(int(match.group(1)), 16 * 1024)
         self.assertIn("peripheralCatalogAvailable", SOURCE)
         self.assertIn("peripheralCatalogOversize", SOURCE)
+        # 大小口径必须与云端存储一致：UTF-8 字节数，而非 UTF-16 长度
+        self.assertIn("TextEncoder", SOURCE)
 
 
 if __name__ == "__main__":
