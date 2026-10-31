@@ -7,6 +7,7 @@
 #include "core/RuleScriptConfigValidation.h"
 #include "core/RuntimeFeatureManager.h"
 #include "systems/ConfigStorage.h"
+#include "systems/ConfigTransaction.h"
 #include "systems/LoggerSystem.h"
 
 RuleScriptManager& RuleScriptManager::getInstance() {
@@ -70,6 +71,7 @@ bool RuleScriptManager::stop() {
 // ========== CRUD（带互斥量保护） ==========
 
 bool RuleScriptManager::addRule(const RuleScript& rule) {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     AccessGuard access(*this);
     MutexGuard lock(access.mutex(), 0);
     if (!lock.isLocked()) return false;
@@ -91,6 +93,7 @@ bool RuleScriptManager::addRule(const RuleScript& rule) {
 }
 
 bool RuleScriptManager::updateRule(const String& id, const RuleScript& rule, const RuleScript* expected) {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     AccessGuard access(*this);
     MutexGuard lock(access.mutex(), 0);
     if (!lock.isLocked()) return false;
@@ -114,6 +117,7 @@ bool RuleScriptManager::updateRule(const String& id, const RuleScript& rule, con
 }
 
 bool RuleScriptManager::removeRule(const String& id) {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     AccessGuard access(*this);
     MutexGuard lock(access.mutex(), 0);
     if (!lock.isLocked()) return false;
@@ -126,6 +130,7 @@ bool RuleScriptManager::removeRule(const String& id) {
 }
 
 bool RuleScriptManager::copyRule(const String& id, RuleScript& result) const {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     AccessGuard access(*this);
     MutexGuard lock(access.mutex(), 0);
     if (!lock.isLocked()) return false;
@@ -139,6 +144,7 @@ bool RuleScriptManager::copyRule(const String& id, RuleScript& result) const {
 
 std::vector<RuleScript> RuleScriptManager::getAllRules() const {
     std::vector<RuleScript> result;
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     AccessGuard access(*this);
     MutexGuard lock(access.mutex(), 0);
     if (!lock.isLocked()) return result;
@@ -150,12 +156,14 @@ std::vector<RuleScript> RuleScriptManager::getAllRules() const {
 }
 
 size_t RuleScriptManager::getRuleCount() const {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     AccessGuard access(*this);
     MutexGuard lock(access.mutex(), 0);
     return lock.isLocked() ? _rules.size() : 0;
 }
 
 bool RuleScriptManager::enableRule(const String& id) {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     AccessGuard access(*this);
     MutexGuard lock(access.mutex(), 0);
     if (!lock.isLocked()) return false;
@@ -168,6 +176,7 @@ bool RuleScriptManager::enableRule(const String& id) {
 }
 
 bool RuleScriptManager::disableRule(const String& id) {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     AccessGuard access(*this);
     MutexGuard lock(access.mutex(), 0);
     if (!lock.isLocked()) return false;
@@ -182,6 +191,7 @@ bool RuleScriptManager::disableRule(const String& id) {
 // ========== 持久化 ==========
 
 bool RuleScriptManager::commitRuleChange(const String& id, const RuleScript* replacement) {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     if (id.isEmpty() || (replacement && replacement->id != id)) return false;
     if (_rules.size() + (replacement && !_rules.count(id) ? 1 : 0) > FastBee::RuleScriptImportMaxRules) return false;
     FastBee::RuleScriptJsonAllocator allocator;
@@ -209,6 +219,7 @@ bool RuleScriptManager::commitRuleChange(const String& id, const RuleScript* rep
 }
 
 bool RuleScriptManager::saveConfiguration() {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     AccessGuard access(*this);
     MutexGuard lock(access.mutex(), 0);
     if (!lock.isLocked()) return false;
@@ -229,6 +240,7 @@ bool RuleScriptManager::saveConfiguration() {
 }
 
 bool RuleScriptManager::importConfiguration(const JsonDocument& document, String& error) {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     AccessGuard access(*this);
     if (!access.admitted()) { error = "Script rules are unavailable; nothing was applied"; return false; }
     if (document.overflowed() || measureJson(document) > FastBee::RuleScriptImportMaxBytes) {
@@ -253,6 +265,7 @@ bool RuleScriptManager::importConfiguration(const JsonDocument& document, String
 }
 
 bool RuleScriptManager::loadConfiguration() {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     AccessGuard access(*this);
     MutexGuard lock(access.mutex(), 0);
     if (!lock.isLocked()) return false;
@@ -363,6 +376,7 @@ String RuleScriptManager::applyTemplate(const String& templateStr, const String&
 
 String RuleScriptManager::applyReceiveTransform(uint8_t protocolType, const String& rawData) {
     if (!FastBee::RuntimeFeatureManager::instance().shouldEnable("ruleScript")) return rawData;
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     AccessGuard access(*this);
     if (!access.admitted()) return rawData;
     String scriptCopy;
@@ -389,6 +403,7 @@ String RuleScriptManager::applyReceiveTransform(uint8_t protocolType, const Stri
 
 String RuleScriptManager::applyReportTransform(uint8_t protocolType, const String& rawData) {
     if (!FastBee::RuntimeFeatureManager::instance().shouldEnable("ruleScript")) return rawData;
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     AccessGuard access(*this);
     if (!access.admitted()) return rawData;
     String scriptCopy;
@@ -420,6 +435,7 @@ bool RuleScriptManager::tryApplyReportTransform(uint8_t protocolType, const Stri
     if (!features.isUserEnabled("ruleScript"))
         return FastBee::copyCheckedText(output, rawData.c_str(), rawData.length(), maxBytes);
     if (!features.shouldEnable("ruleScript")) return false;
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     AccessGuard access(*this);
     if (!access.admitted()) return false;
     String script;
@@ -492,6 +508,7 @@ String RuleScriptManager::applyReceiveTransform(uint8_t protocolType, const Stri
                                                  const String& topic, String* outTargetTopic) {
     if (outTargetTopic) *outTargetTopic = "";
     if (!FastBee::RuntimeFeatureManager::instance().shouldEnable("ruleScript")) return rawData;
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     AccessGuard access(*this);
     if (!access.admitted()) return rawData;
     String scriptCopy;

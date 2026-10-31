@@ -6,10 +6,12 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <memory>
+#include <mutex>
 #include <freertos/semphr.h>
 #include "core/SystemConstants.h"
 #include "core/FeatureFlags.h"
 #include "core/interfaces/IConfigStorage.h"
+#include "systems/ConfigTransaction.h"
 
 // ============================================================================
 // ConfigStorage - 配置存储管理器（Meyers' Singleton）
@@ -26,6 +28,9 @@ public:
 
     // 获取单例实例（Meyers' Singleton，线程安全）
     static ConfigStorage& getInstance();
+    static std::recursive_mutex& transactionMutex() {
+        return FastBee::ConfigTransaction::mutex();
+    }
 
     // 简单判断是否可用
     static bool isInitialized();

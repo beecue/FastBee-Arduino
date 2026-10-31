@@ -10,6 +10,7 @@
 #include "core/RuleOutputIdentity.h"
 #include "core/MemoryBudget.h"
 #include "systems/LoggerSystem.h"
+#include "systems/ConfigTransaction.h"
 #include "utils/FileUtils.h"
 #include "utils/SharedJsonSerializer.h"
 #include "utils/SharedJsonDeserializer.h"
@@ -316,6 +317,7 @@ static bool validateRuleProfileLimits(const PeriphExecRule& rule, const char* op
 // ========== 持久化 ==========
 
 bool PeriphExecManager::saveConfiguration() {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     MutexGuard lock(_rulesMutex);
     if (!lock.isLocked()) {
         LOGGER.warning("[PeriphExec] Save skipped: rule configuration is locked");
@@ -528,6 +530,7 @@ bool PeriphExecManager::readConfigurationIrKeys(const char* path, bool legacy, S
 }
 
 bool PeriphExecManager::importConfigurationFile(const char* stagedPath, String& errorMsg) {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     MutexGuard lock(_rulesMutex, pdMS_TO_TICKS(PERIPH_EXEC_RULE_MUTATION_LOCK_TIMEOUT_MS));
     if (!lock.isLocked()) return configError(errorMsg, "RULE_SERVICE_BUSY");
     if (_configurationRestartPending) return configError(errorMsg, "CONFIG_PENDING_RESTART");

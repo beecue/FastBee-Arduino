@@ -6,6 +6,7 @@
  */
 
 #include "core/PeripheralManager.h"
+#include "systems/ConfigTransaction.h"
 #include "core/Pca9685ConfigSupport.h"
 #include "core/H1ParameterContract.h"
 #include "core/AsyncExecTypes.h"
@@ -1253,6 +1254,7 @@ bool PeripheralManager::disablePeripheral(const String& id) {
 bool PeripheralManager::applyMutationTransactional(
     const String& snapshotId, const String& resultId,
     const std::function<bool(String&)>& mutation, String& errorMsg) {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     RecursiveMutexGuard lock(_mutex);
     // A transactional rollback must never restore a snapshot of an old grant.
     // End ordinary control explicitly before changing that target's config.

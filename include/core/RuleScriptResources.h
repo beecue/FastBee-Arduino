@@ -6,6 +6,7 @@
 #include <new>
 #include <utility>
 #include "core/MemoryBudget.h"
+#include "systems/ConfigTransaction.h"
 
 namespace FastBee {
 // Match the existing optional-feature reserve. PSRAM never substitutes for

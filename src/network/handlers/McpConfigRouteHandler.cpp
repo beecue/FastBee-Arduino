@@ -5,7 +5,9 @@
 
 #include "network/WebHandlerContext.h"
 #include "network/handlers/HandlerUtils.h"
+#include "network/SameOrigin.h"
 #include "protocols/ProtocolManager.h"
+#include "utils/PsramJsonDocument.h"
 
 namespace {
 
@@ -13,9 +15,10 @@ struct BodyBuffer {
     String content;
     bool oversized = false;
 };
+using BodyOwner = std::unique_ptr<BodyBuffer>;
 
-BodyBuffer* bodyOf(AsyncWebServerRequest* request) {
-    return static_cast<BodyBuffer*>(request->_tempObject);
+BodyOwner* bodyOf(AsyncWebServerRequest* request) {
+    return static_cast<BodyOwner*>(request->_tempObject);
 }
 
 void releaseBody(AsyncWebServerRequest* request) {
@@ -41,6 +44,9 @@ McpConfigRouteHandler::McpConfigRouteHandler(WebHandlerContext* ctx) : ctx_(ctx)
 }
 
 void McpConfigRouteHandler::setupRoutes(AsyncWebServer* server) {
+#ifndef UNIT_TEST
+    if (ctx_->protocolManager) service_->setProtocolManager(ctx_->protocolManager);
+#endif
     server->on(AsyncURIMatcher::exact("/api/mcp/capabilities"), HTTP_GET,
                [this](AsyncWebServerRequest* request) { handleCapabilities(request); });
     server->on(AsyncURIMatcher::exact("/api/mcp/config/snapshot"), HTTP_GET,
@@ -63,6 +69,12 @@ void McpConfigRouteHandler::setupRoutes(AsyncWebServer* server) {
                       size_t index, size_t total) {
                    accumulateBody(request, data, len, index, total);
                });
+    server->on(AsyncURIMatcher::exact("/api/mcp/config/readback"), HTTP_POST,
+               [this](AsyncWebServerRequest* request) { handleRecovery(request); }, nullptr,
+               [this](AsyncWebServerRequest* request, uint8_t* data, size_t len,
+                      size_t index, size_t total) {
+                   accumulateBody(request, data, len, index, total);
+               });
     server->on(AsyncURIMatcher::prefix("/api/mcp/config/operations/"), HTTP_GET,
                [this](AsyncWebServerRequest* request) { handleOperation(request); });
     server->on(AsyncURIMatcher::prefix("/api/mcp/secrets/"), HTTP_POST,
@@ -74,6 +86,7 @@ void McpConfigRouteHandler::setupRoutes(AsyncWebServer* server) {
 }
 
 bool McpConfigRouteHandler::admit(AsyncWebServerRequest* request, bool heavy) {
+    if (!ctx_->requireSameOrigin(request)) return false;
     if (!ctx_->requireAuth(request) || !ctx_->requireDeveloperMode(request)) return false;
     if (!service_) {
         ctx_->sendError(request, 503, "MCP configuration service unavailable");
@@ -89,31 +102,32 @@ void McpConfigRouteHandler::accumulateBody(AsyncWebServerRequest* request, uint8
                                            size_t len, size_t index, size_t total) {
     if (index == 0) {
         releaseBody(request);
-        request->_tempObject = new (std::nothrow) BodyBuffer();
-        BodyBuffer* body = bodyOf(request);
-        if (body) {
-            body->oversized = total > kMaxBodyBytes;
-            if (!body->oversized) body->content.reserve(total);
+        request->_tempObject = new (std::nothrow) BodyOwner(new (std::nothrow) BodyBuffer());
+        request->onDisconnect([request]() { releaseBody(request); });
+        BodyOwner* body = bodyOf(request);
+        if (body && *body) {
+            (*body)->oversized = total > kMaxBodyBytes;
+            if (!(*body)->oversized) (*body)->content.reserve(total);
         }
     }
-    BodyBuffer* body = bodyOf(request);
-    if (!body || body->oversized || total > kMaxBodyBytes) return;
-    if (body->content.concat(reinterpret_cast<const char*>(data), len) == false) {
-        body->oversized = true;
+    BodyOwner* body = bodyOf(request);
+    if (!body || !*body || (*body)->oversized || total > kMaxBodyBytes) return;
+    if ((*body)->content.concat(reinterpret_cast<const char*>(data), len) == false) {
+        (*body)->oversized = true;
     }
 }
 
 bool McpConfigRouteHandler::parseBody(AsyncWebServerRequest* request, JsonDocument& document) {
-    BodyBuffer* body = bodyOf(request);
-    if (!body || body->oversized || body->content.isEmpty()) {
-        const bool oversized = body && body->oversized;
+    BodyOwner* body = bodyOf(request);
+    if (!body || !*body || (*body)->oversized || (*body)->content.isEmpty()) {
+        const bool oversized = body && *body && (*body)->oversized;
         releaseBody(request);
         ctx_->sendError(request, oversized ? 413 : 400,
                         oversized ? "JSON body too large" : "Missing JSON body");
         return false;
     }
-    const DeserializationError parseError = deserializeJson(document, body->content.c_str(),
-                                                            body->content.length());
+    const DeserializationError parseError = deserializeJson(document, (*body)->content.c_str(),
+                                                            (*body)->content.length());
     releaseBody(request);
     if (parseError || document.overflowed() || !document.is<JsonObject>()) {
         ctx_->sendBadRequest(request, "Invalid or incomplete JSON body");
@@ -141,7 +155,7 @@ void McpConfigRouteHandler::handleCapabilities(AsyncWebServerRequest* request) {
         ctx_->sendError(request, 503, "MCP configuration service unavailable");
         return;
     }
-    JsonDocument output;
+    auto output = FastBee::makeJsonDocument();
     String error;
     service_->capabilities(output, error);
     sendDocument(request, output, output["success"] | false ? 200 : 503);
@@ -164,7 +178,7 @@ void McpConfigRouteHandler::handleSnapshot(AsyncWebServerRequest* request) {
         sections.push_back(section);
         start = end + 1;
     }
-    JsonDocument output;
+    auto output = FastBee::makeJsonDocument();
     String error;
     service_->snapshot(sections, output, error);
     output["snapshotAtMs"] = millis();
@@ -173,9 +187,9 @@ void McpConfigRouteHandler::handleSnapshot(AsyncWebServerRequest* request) {
 
 void McpConfigRouteHandler::handlePreflight(AsyncWebServerRequest* request) {
     if (!admit(request, true)) return;
-    JsonDocument input;
+    auto input = FastBee::makeJsonDocument();
     if (!parseBody(request, input)) return;
-    JsonDocument output;
+    auto output = FastBee::makeJsonDocument();
     String error;
     service_->preflight(input, output, error);
     sendDocument(request, output, output["success"] | false ? 200 : errorStatus(output["code"].as<const char*>()));
@@ -183,12 +197,12 @@ void McpConfigRouteHandler::handlePreflight(AsyncWebServerRequest* request) {
 
 void McpConfigRouteHandler::handleApply(AsyncWebServerRequest* request) {
     if (!admit(request, true)) return;
-    JsonDocument input;
+    auto input = FastBee::makeJsonDocument();
     if (!parseBody(request, input)) return;
 #ifndef UNIT_TEST
     if (ctx_->protocolManager) service_->setProtocolManager(ctx_->protocolManager);
 #endif
-    JsonDocument output;
+    auto output = FastBee::makeJsonDocument();
     String error;
     service_->apply(input, output, error);
     sendDocument(request, output, error.isEmpty() ? 200 : errorStatus(error));
@@ -207,17 +221,35 @@ void McpConfigRouteHandler::handleOperation(AsyncWebServerRequest* request) {
         ctx_->sendBadRequest(request, "Invalid operation ID");
         return;
     }
-    JsonDocument output;
+    auto output = FastBee::makeJsonDocument();
     String error;
-    service_->operation(id, output, error);
-    sendDocument(request, output, output["success"] | false && error == "OPERATION_NOT_FOUND" ? 404 : 200);
+    const bool found = service_->operation(id, output, error);
+    sendDocument(request, output, found ? 200 : 404);
+}
+
+void McpConfigRouteHandler::handleRecovery(AsyncWebServerRequest* request) {
+    if (!admit(request, true)) return;
+    auto input = FastBee::makeJsonDocument();
+    if (!parseBody(request, input)) return;
+    const String operationId = input["operationId"].as<const char*>();
+    if (operationId.isEmpty()) {
+        ctx_->sendBadRequest(request, "operationId is required");
+        return;
+    }
+    auto output = FastBee::makeJsonDocument();
+    String error;
+    service_->recoverOperation(operationId, output, error);
+    sendDocument(request, output, error == "OPERATION_NOT_FOUND" ? 404 : 200);
 }
 
 void McpConfigRouteHandler::handleRollback(AsyncWebServerRequest* request) {
     if (!admit(request, true)) return;
-    JsonDocument input;
+    auto input = FastBee::makeJsonDocument();
     if (!parseBody(request, input)) return;
-    JsonDocument output;
+#ifndef UNIT_TEST
+    if (ctx_->protocolManager) service_->setProtocolManager(ctx_->protocolManager);
+#endif
+    auto output = FastBee::makeJsonDocument();
     String error;
     service_->rollback(input, output, error);
     sendDocument(request, output, error.isEmpty() ? 200 : errorStatus(error));
@@ -233,20 +265,26 @@ void McpConfigRouteHandler::handleSecret(AsyncWebServerRequest* request) {
         ctx_->sendBadRequest(request, "Invalid secret reference");
         return;
     }
-    JsonDocument input;
+    auto input = FastBee::makeJsonDocument();
     if (!parseBody(request, input)) return;
-    if (input.size() != 1 || !input["value"].is<JsonString>() ||
+    if (input.size() != 2 || !input["value"].is<JsonString>() ||
         input["value"].as<JsonString>().size() > 1024 ||
-        input["value"].as<JsonString>().size() != std::strlen(input["value"].as<const char*>())) {
-        ctx_->sendBadRequest(request, "Invalid one-time secret value");
+        input["value"].as<JsonString>().size() != std::strlen(input["value"].as<const char*>()) ||
+        !input["idempotencyKey"].is<JsonString>() || input["idempotencyKey"].as<JsonString>().size() == 0 ||
+        input["idempotencyKey"].as<JsonString>().size() > 80) {
+        ctx_->sendBadRequest(request, "Invalid one-time secret value or idempotency key");
         return;
     }
     String value = input["value"].as<const char*>();
+    const String idempotencyKey = input["idempotencyKey"].as<const char*>();
     String error;
-    const bool stored = service_->storeSecret(secretRef, value, error);
+#ifndef UNIT_TEST
+    if (ctx_->protocolManager) service_->setProtocolManager(ctx_->protocolManager);
+#endif
+    const bool stored = service_->storeSecret(secretRef, value, idempotencyKey, error);
     value = "";
     input.clear();
-    JsonDocument output;
+    auto output = FastBee::makeJsonDocument();
     output["success"] = stored;
     if (!stored) {
         output["code"] = error;

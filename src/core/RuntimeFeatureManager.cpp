@@ -17,6 +17,7 @@
 #include "core/FeatureBudget.h"
 #include "core/FeatureFlags.h"
 #include "systems/ConfigStorage.h"
+#include "systems/ConfigTransaction.h"
 #include "systems/LoggerSystem.h"
 
 #if defined(ESP_PLATFORM)
@@ -596,6 +597,7 @@ bool RuntimeFeatureManager::restoreUserConfig(const UserConfigSnapshot& snapshot
 
 RuntimeFeatureManager::ConfigUpdateResult RuntimeFeatureManager::updateAndSave(
     const JsonDocument& doc, UserConfigSnapshot* previousState) {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     const UserConfigSnapshot before = captureUserConfig();
     if (previousState) *previousState = before;
     if (!updateFromJson(doc)) return ConfigUpdateResult::NO_VALID_ENTRIES;

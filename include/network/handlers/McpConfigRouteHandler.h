@@ -28,6 +28,7 @@ private:
     void handlePreflight(AsyncWebServerRequest* request);
     void handleApply(AsyncWebServerRequest* request);
     void handleOperation(AsyncWebServerRequest* request);
+    void handleRecovery(AsyncWebServerRequest* request);
     void handleRollback(AsyncWebServerRequest* request);
     void handleSecret(AsyncWebServerRequest* request);
     void sendDocument(AsyncWebServerRequest* request, JsonDocument& document, int status = 200);

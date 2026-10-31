@@ -18,6 +18,7 @@ async function installDevice(page: any) {
       revision: 'rev-a',
       applyCalls: 0,
       rollbackCalls: 0,
+      recoveryCalls: 0,
       operation: null as any,
       values: { features: { enabled: false }, peripherals: { count: 0 }, protocol: { password: 'secret' } },
     };
@@ -73,6 +74,13 @@ async function installDevice(page: any) {
           return d.operation;
         }
         if (path === '/api/mcp/config/operations/op-1') {
+          return d.operation;
+        }
+        if (path === '/api/mcp/config/readback') {
+          ++d.recoveryCalls;
+          d.operation.state = 'SUCCEEDED';
+          d.operation.success = true;
+          d.operation.readbackRequired = false;
           return d.operation;
         }
         if (path === '/api/mcp/config/rollback') {
@@ -135,7 +143,9 @@ test('unknown outcome permits readback but blocks rollback or replay until resol
     const operation = await w.api('/api/mcp/config/operations/op-1');
     const rollback = await w.api('/api/mcp/config/rollback', 'POST', {
       operationId: 'op-1', approvalHash: 'new-recovery-approval', idempotencyKey: 'rollback-u' });
-    return { first, duplicate, operation, rollback, applyCalls: w.device.applyCalls, rollbackCalls: w.device.rollbackCalls };
+    const recovery = await w.api('/api/mcp/config/readback', 'POST', { operationId: 'op-1' });
+    return { first, duplicate, operation, rollback, recovery, applyCalls: w.device.applyCalls,
+      rollbackCalls: w.device.rollbackCalls, recoveryCalls: w.device.recoveryCalls };
   });
   expect(result.first.body.state).toBe('UNKNOWN');
   expect(result.duplicate.body.operationId).toBe('op-1');
@@ -143,4 +153,7 @@ test('unknown outcome permits readback but blocks rollback or replay until resol
   expect(result.applyCalls).toBe(1);
   expect(result.rollbackCalls).toBe(0);
   expect(result.rollback.body.code).toBe('OUTCOME_UNKNOWN');
+  expect(result.recovery.body.state).toBe('SUCCEEDED');
+  expect(result.recoveryCalls).toBe(1);
+  expect(result.applyCalls).toBe(1);
 });

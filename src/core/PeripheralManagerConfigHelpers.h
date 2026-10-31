@@ -2,6 +2,7 @@
 
 #include "core/FeatureFlags.h"
 #include "core/PeripheralConfig.h"
+#include "systems/ConfigTransaction.h"
 
 namespace FastBee {
 namespace PeripheralManagerConfigDetail {

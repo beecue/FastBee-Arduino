@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <new>
 
+#include "systems/ConfigStorage.h"
+#include "systems/ConfigTransaction.h"
+
 #ifndef UNIT_TEST
 #include "core/MemoryBudget.h"
 #include "core/PeripheralManager.h"
@@ -13,6 +16,7 @@
 #include "core/RuleScriptResources.h"
 #include "core/RuntimeFeatureManager.h"
 #include "network/ProtocolSecret.h"
+#include "network/ProtocolConfigValidation.h"
 #include "protocols/ProtocolManager.h"
 #include "systems/ConfigMigrationModbus.h"
 #include "systems/ConfigMigrationValidation.h"
@@ -82,6 +86,62 @@ int sectionRank(const char* section) {
     if (!std::strcmp(section, "ruleScripts")) return 3;
     if (!std::strcmp(section, "periphExec")) return 4;
     return 5;
+}
+
+struct SnapshotValue {
+    ManagedConfigSectionAdapter* adapter = nullptr;
+    JsonDocument value;
+    String hash;
+};
+
+bool readConsistentValues(const std::vector<ManagedConfigSectionAdapter*>& adapters,
+                          const std::vector<String>& selected,
+                          std::vector<SnapshotValue>& values, String& error) {
+    size_t aggregate = 0;
+    values.clear();
+    values.reserve(selected.empty() ? adapters.size() : selected.size());
+    for (auto* adapter : adapters) {
+        if (!selected.empty() && std::find(selected.begin(), selected.end(),
+                                          String(adapter->section())) == selected.end()) continue;
+        SnapshotValue entry;
+        entry.adapter = adapter;
+#ifndef UNIT_TEST
+        entry.value = FastBee::makeJsonDocument();
+#endif
+        if (!adapter->readRedacted(entry.value, error) || entry.value.overflowed() ||
+            !entry.value.is<JsonObject>()) {
+            if (error.isEmpty()) error = "CONFIG_READ_FAILED";
+            return false;
+        }
+        const size_t bytes = measureJson(entry.value);
+        if (bytes > ManagedConfigApplyService::kMaxAggregateBytes - aggregate) {
+            error = "QUOTA_EXCEEDED";
+            return false;
+        }
+        aggregate += bytes;
+        entry.hash = ManagedConfigRevision::sectionHash(entry.value);
+        if (entry.hash.length() != 64) {
+            error = "CONFIG_READ_FAILED";
+            return false;
+        }
+        values.push_back(std::move(entry));
+    }
+    for (const auto& requested : selected) {
+        bool found = false;
+        for (const auto& entry : values) found = found || requested == entry.adapter->section();
+        if (!found) {
+            error = "INVALID_ARGUMENT";
+            return false;
+        }
+    }
+    return true;
+}
+
+String revisionFromValues(const std::vector<SnapshotValue>& values) {
+    std::vector<std::pair<String, String>> hashes;
+    hashes.reserve(values.size());
+    for (const auto& entry : values) hashes.emplace_back(entry.adapter->section(), entry.hash);
+    return ManagedConfigRevision::globalRevision(hashes);
 }
 
 } // namespace
@@ -399,6 +459,7 @@ public:
         JsonDocument document;
         if (!readRaw(document, error)) return false;
         document["mqtt"][field] = value;
+        if (!validateProtocolConfigDocument(document, error)) return false;
         if (!ConfigStorage::getInstance().saveProtocolConfig(document)) {
             error = "SAVE_FAILED";
             return false;
@@ -409,42 +470,12 @@ public:
 
 protected:
     bool validateSection(JsonVariantConst candidate, String& error) override {
-        for (JsonPairConst row : candidate.as<JsonObjectConst>()) {
-            const String key = row.key().c_str();
-            if (key != "version" && key != "mqtt" && key != "modbusRtu" &&
-                key != "coap" && key != "tcp" && key != "http" && key != "remote") {
-                error = "CONFIG_UNKNOWN_FIELD";
-                return false;
-            }
-        }
-        static const char* const mqttFields[] = {
-            "enabled","scheme","server","port","clientId","username","password","topicPrefix",
-            "otaBaseUrl","subscribeTopic","keepAlive","autoReconnect","authType","deviceNum",
-            "productId","userId","mqttSecret","authCode","ntpServer","willTopic","willPayload",
-            "willQos","willRetain","longitude","latitude","iccid","cardPlatformId","summary",
-            "publishTopics","subscribeTopics","disabled_by_memory","disable_mqtt_by_memory",
-            "downgraded_by_memory","downgraded_original_scheme","downgraded_original_port",
-        };
-        for (JsonPairConst row : candidate["mqtt"].as<JsonObjectConst>()) {
-            bool known = false;
-            for (const char* field : mqttFields) known = known || row.key() == field;
-            if (!known) {
-                error = "CONFIG_UNKNOWN_FIELD";
-                return false;
-            }
-        }
-        if (!candidate["modbusRtu"].isNull()) {
-            ConfigMigration::ModbusReviewGraph graph;
-            if (!ConfigMigration::readModbusReviewGraph(candidate["modbusRtu"], graph)) {
-                error = "MIGRATION_MODBUS_BASELINE_SCHEMA";
-                return false;
-            }
-        }
-        return true;
+        return validateProtocolConfigDocument(candidate, error);
     }
 
-    bool preflightSection(JsonVariantConst candidate, ManagedPreflightResult& result,
-                          String& error) override {
+    bool preflightGraph(JsonVariantConst candidate, JsonVariantConst graph,
+                        ManagedPreflightResult& result, String& error) override {
+        result = ManagedPreflightResult();
         const auto rtu = candidate["modbusRtu"].as<JsonObjectConst>();
         if (!(rtu["enabled"] | false) || String(rtu["mode"] | "slave") != "master") return true;
         auto& features = RuntimeFeatureManager::instance();
@@ -455,11 +486,14 @@ protected:
                 break;
             }
         }
+        const bool featureEnabled = graph["features"]["features"]["modbus"]["enabled"] == true;
         const String peripheralId = rtu["peripheralId"] | "";
-        const PeripheralConfig* uart = peripheralId.isEmpty() ? nullptr
-            : PeripheralManager::getInstance().getPeripheral(peripheralId);
-        if (!modbus || !modbus->compiled || !features.isUserEnabled("modbus") ||
-            !uart || uart->type != PeripheralType::UART || !uart->enabled) {
+        bool uartEnabled = false;
+        for (JsonObjectConst peripheral : graph["peripherals"]["peripherals"].as<JsonArrayConst>()) {
+            if (peripheral["id"] == peripheralId && peripheral["type"] == static_cast<int>(PeripheralType::UART) &&
+                peripheral["enabled"] == true) uartEnabled = true;
+        }
+        if (!modbus || !modbus->compiled || !featureEnabled || !uartEnabled) {
             error = "MIGRATION_PROTOCOL_UART_MISSING";
             result.allowed = false;
             result.error = error;
@@ -485,7 +519,7 @@ protected:
             manager_->requestMqttRestartAsync();
 #if FASTBEE_ENABLE_MODBUS
             if (document["modbusRtu"]["enabled"] | false) manager_->restartModbusDeferred();
-            else manager_->stopModbus();
+            else manager_->requestModbusStopAsync();
 #endif
         }
         return {ManagedAdapterApplyStatus::Persisted, false, ""};
@@ -550,20 +584,45 @@ protected:
     }
 
     ManagedAdapterApplyResult applySection(JsonVariantConst candidate, String& error) override {
-        const String staged = "/config/periph_exec.mcp.staged.json";
-        JsonDocument document;
-        auto& storage = ConfigStorage::getInstance();
-        if (!document.set(candidate) || !storage.saveImportedJSONConfig(staged, document)) {
-            error = "SAVE_FAILED";
-            return {ManagedAdapterApplyStatus::SaveFailed, true, error};
+        const size_t bytes = measureJson(candidate);
+        if (!bytes || bytes > ConfigMigration::MaxFileBytes) {
+            error = "QUOTA_EXCEEDED";
+            return {ManagedAdapterApplyStatus::Rejected, true, error};
         }
-        auto& manager = PeriphExecManager::getInstance();
-        if (!manager.importConfigurationFile(staged.c_str(), error)) {
-            storage.deleteJSONConfigGenerations(staged);
-            if (error.isEmpty()) error = "SAVE_FAILED";
-            return {ManagedAdapterApplyStatus::SaveFailed, true, error};
+        ConfigMigration::Guard guard;
+        if (!guard) {
+            error = "OPERATION_IN_PROGRESS";
+            return {ManagedAdapterApplyStatus::Rejected, true, error};
         }
-        storage.deleteJSONConfigGenerations(staged);
+        ConfigMigration::Storage storage;
+        ConfigMigration::Selection selected[] = {{3, static_cast<uint32_t>(bytes)}};
+        const String session = ManagedConfigRevision::sectionHash(candidate).substring(0, 32);
+        if (session.length() != 32 || !storage.begin(session.c_str(), selected, 1, error)) {
+            if (error.isEmpty()) error = "MIGRATION_SLOT_OCCUPIED";
+            return {ManagedAdapterApplyStatus::Rejected, true, error};
+        }
+        String content;
+        content.reserve(bytes);
+        const bool appended = serializeJson(candidate, content) == bytes &&
+            storage.append(session.c_str(), 3, 0,
+                           reinterpret_cast<const uint8_t*>(content.c_str()), content.length(), error);
+        bool imported = false;
+        if (appended) {
+            const String staged = ConfigMigration::Storage::slotPath(0, ConfigMigration::Slot::Candidate);
+            imported = PeriphExecManager::getInstance().importConfigurationFile(staged.c_str(), error);
+        }
+        String discardError;
+        const bool discarded = storage.discard(session.c_str(), discardError);
+        if (!imported) {
+            if (!appended && error.isEmpty()) error = "SAVE_FAILED";
+            if (!discarded) error = "OUTCOME_UNKNOWN";
+            return {discarded ? ManagedAdapterApplyStatus::SaveFailed : ManagedAdapterApplyStatus::Unknown,
+                    true, error};
+        }
+        if (!discarded) {
+            error = discardError.isEmpty() ? String("OUTCOME_UNKNOWN") : discardError;
+            return {ManagedAdapterApplyStatus::Unknown, true, error};
+        }
         return {ManagedAdapterApplyStatus::PendingRestart, true, ""};
     }
 };
@@ -612,11 +671,14 @@ struct ManagedConfigApplyService::DefaultAdapters {};
 ManagedConfigApplyService::ManagedConfigApplyService(bool registerDefaults) {
     adapters_.reserve(kMaxAdapters);
 #ifndef UNIT_TEST
+    initialized_ = registerDefaults;
     if (registerDefaults) {
         defaults_ = new (std::nothrow) DefaultAdapters();
         if (defaults_) registerDefaultAdapters();
+        initialized_ = defaults_ && adapters_.size() == 7;
     }
 #else
+    initialized_ = true;
     (void)registerDefaults;
 #endif
 }
@@ -683,25 +745,29 @@ String ManagedConfigApplyService::currentRevision(String* error) {
 
 bool ManagedConfigApplyService::capabilities(JsonDocument& output, String& error) {
     std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     output.clear();
-    const String revision = currentRevision(&error);
-    if (revision.isEmpty()) return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error,
-                                        error.isEmpty() ? "CONFIG_READ_FAILED" : error.c_str());
+    if (!initialized_) return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, "MCP adapter allocation failed");
+    std::vector<SnapshotValue> values;
+    if (!readConsistentValues(adapters_, {}, values, error)) {
+        return fail(output, error == "QUOTA_EXCEEDED" ? "QUOTA_EXCEEDED" : "DEVICE_CHANNEL_UNAVAILABLE",
+                    error, error.c_str());
+    }
+    const String revision = revisionFromValues(values);
+    if (revision.isEmpty()) return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, "CONFIG_READ_FAILED");
     output["success"] = true;
     output["schemaVersion"] = 1;
     output["compiled"] = true;
     output["runtimeAvailable"] = true;
     output["revision"] = revision;
     JsonObject sections = output["sections"].to<JsonObject>();
-    for (auto* adapterValue : adapters_) {
-        String readError;
-        const String hash = currentSectionRevision(*adapterValue, readError);
-        if (hash.length() != 64) return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, readError.c_str());
+    for (const auto& entry : values) {
+        auto* adapterValue = entry.adapter;
         JsonObject row = sections[adapterValue->section()].to<JsonObject>();
         row["schemaVersion"] = adapterValue->schemaVersion();
         row["readOnly"] = adapterValue->readOnly();
-        row["hash"] = hash;
-        row["revision"] = hash;
+        row["hash"] = entry.hash;
+        row["revision"] = entry.hash;
         size_t count = 0;
         const char* const* dependencies = adapterValue->dependencies(count);
         JsonArray dependencyRows = row["dependencies"].to<JsonArray>();
@@ -713,29 +779,43 @@ bool ManagedConfigApplyService::capabilities(JsonDocument& output, String& error
     return !output.overflowed() || fail(output, "QUOTA_EXCEEDED", error, "CAPACITY");
 }
 
+bool ManagedConfigApplyService::checkUnknownGate(JsonDocument& output, String& error) const {
+    if (unresolvedOperationId_.isEmpty()) return false;
+    output.clear();
+    output["success"] = false;
+    output["code"] = "OUTCOME_UNKNOWN";
+    output["error"] = "OUTCOME_UNKNOWN";
+    output["operationId"] = unresolvedOperationId_;
+    output["readbackRequired"] = true;
+    error = "OUTCOME_UNKNOWN";
+    return true;
+}
+
 bool ManagedConfigApplyService::snapshot(const std::vector<String>& selected,
                                          JsonDocument& output, String& error) {
     std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     output.clear();
-    const String revision = currentRevision(&error);
-    if (revision.isEmpty()) return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error,
-                                        error.isEmpty() ? "CONFIG_READ_FAILED" : error.c_str());
+    if (!initialized_) return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, "MCP adapter allocation failed");
+    std::vector<SnapshotValue> values;
+    if (!readConsistentValues(adapters_, selected, values, error)) {
+        return fail(output, error == "QUOTA_EXCEEDED" ? "QUOTA_EXCEEDED" :
+                    error == "INVALID_ARGUMENT" ? "INVALID_ARGUMENT" : "DEVICE_CHANNEL_UNAVAILABLE",
+                    error, error.c_str());
+    }
+    const String revision = revisionFromValues(values);
+    if (revision.isEmpty()) return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, "CONFIG_READ_FAILED");
     output["success"] = true;
     output["revision"] = revision;
     JsonObject sections = output["sections"].to<JsonObject>();
-    for (auto* adapterValue : adapters_) {
-        if (!selected.empty() && std::find(selected.begin(), selected.end(),
-                                          String(adapterValue->section())) == selected.end()) continue;
-        JsonDocument value;
-        if (!readValue(*adapterValue, value, error)) {
-            return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, error.c_str());
-        }
+    for (const auto& entry : values) {
+        auto* adapterValue = entry.adapter;
         JsonObject row = sections[adapterValue->section()].to<JsonObject>();
         row["schemaVersion"] = adapterValue->schemaVersion();
         row["readOnly"] = adapterValue->readOnly();
-        row["value"].set(value);
-        row["hash"] = ManagedConfigRevision::sectionHash(value);
-        row["revision"] = row["hash"];
+        row["value"].set(entry.value);
+        row["hash"] = entry.hash;
+        row["revision"] = entry.hash;
         size_t count = 0;
         const char* const* dependencies = adapterValue->dependencies(count);
         JsonArray dependencyRows = row["dependencies"].to<JsonArray>();
@@ -743,16 +823,15 @@ bool ManagedConfigApplyService::snapshot(const std::vector<String>& selected,
         const char* const* secrets = adapterValue->secretFields(count);
         JsonArray secretRows = row["secretFields"].to<JsonArray>();
         for (size_t i = 0; i < count; ++i) secretRows.add(secrets[i]);
-    }
-    for (const auto& requested : selected) {
-        if (sections[requested].isNull()) return fail(output, "INVALID_ARGUMENT", error,
-                                                       "Unknown configuration section");
     }
     return !output.overflowed() || fail(output, "QUOTA_EXCEEDED", error, "CAPACITY");
 }
 
 bool ManagedConfigApplyService::buildCandidate(Candidate& candidate, JsonVariantConst patch,
                                                JsonDocument& output, String& error) {
+#ifndef UNIT_TEST
+    candidate.value = FastBee::makeJsonDocument();
+#endif
     if (!readValue(*candidate.adapter, candidate.value, error)) {
         return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, error.c_str());
     }
@@ -775,16 +854,6 @@ bool ManagedConfigApplyService::checkCandidate(Candidate& candidate, JsonDocumen
     if (!candidate.adapter->validate(candidate.value, error)) {
         return fail(output, "INVALID_ARGUMENT", error, error.isEmpty() ? "INVALID_ARGUMENT" : error.c_str());
     }
-    ManagedPreflightResult result;
-    if (!candidate.adapter->preflight(candidate.value, result, error) || !result.allowed) {
-        output.clear();
-        output["success"] = false;
-        output["allowed"] = false;
-        output["code"] = "PREFLIGHT_FAILED";
-        output["error"] = result.error.isEmpty() ? error : result.error;
-        error = output["error"].as<const char*>();
-        return false;
-    }
     return true;
 }
 
@@ -794,9 +863,10 @@ bool ManagedConfigApplyService::parseCandidates(JsonVariantConst operations,
     if (!operations.is<JsonArrayConst>() || operations.size() == 0) {
         return fail(output, "INVALID_ARGUMENT", error, "operations must be a non-empty array");
     }
-    if (operations.size() > kMaxOperations) {
+    if (operations.size() > kMaxOperations || measureJson(operations) > 32768) {
         return fail(output, "QUOTA_EXCEEDED", error, "Too many configuration operations");
     }
+    size_t aggregate = 0;
     candidates.clear();
     candidates.reserve(operations.size());
     for (JsonObjectConst row : operations.as<JsonArrayConst>()) {
@@ -836,6 +906,13 @@ bool ManagedConfigApplyService::parseCandidates(JsonVariantConst operations,
             clearCandidates(candidates);
             return false;
         }
+        const size_t bytes = measureJson(candidate.value);
+        if (bytes > kMaxAggregateBytes - aggregate) {
+            clearCandidates(candidates);
+            candidate.value.clear();
+            return fail(output, "QUOTA_EXCEEDED", error, "Aggregate candidate budget exceeded");
+        }
+        aggregate += bytes;
         candidates.push_back(std::move(candidate));
         if (candidates.back().adapter != adapterValue) {
             return fail(output, "QUOTA_EXCEEDED", error, "CAPACITY");
@@ -861,10 +938,42 @@ void ManagedConfigApplyService::orderCandidates(std::vector<Candidate>& candidat
     });
 }
 
+bool ManagedConfigApplyService::buildCandidateGraph(const std::vector<Candidate>& candidates,
+                                                     JsonDocument& graph, String& error) {
+    std::vector<SnapshotValue> current;
+    if (!readConsistentValues(adapters_, {}, current, error)) return false;
+    graph.clear();
+    graph["features"].to<JsonObject>();
+    graph["peripherals"].to<JsonObject>();
+    for (const auto& entry : current) {
+        const String section = entry.adapter->section();
+        if (section == "features" || section == "peripherals") graph[section].set(entry.value);
+    }
+    for (const auto& candidate : candidates) {
+        const String section = candidate.adapter->section();
+        if (section == "features" || section == "peripherals") graph[section].set(candidate.value);
+    }
+    return !graph.overflowed();
+}
+
 bool ManagedConfigApplyService::combinedPreflight(std::vector<Candidate>& candidates,
                                                   JsonDocument& output, String& error) {
+    JsonDocument graph;
+    if (!buildCandidateGraph(candidates, graph, error)) {
+        return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, error.c_str());
+    }
     for (auto& candidate : candidates) {
         if (!checkCandidate(candidate, output, error)) return false;
+        ManagedPreflightResult result;
+        if (!candidate.adapter->preflightGraph(candidate.value, graph, result, error) || !result.allowed) {
+            output.clear();
+            output["success"] = false;
+            output["allowed"] = false;
+            output["code"] = "PREFLIGHT_FAILED";
+            output["error"] = result.error.isEmpty() ? error : result.error;
+            error = output["error"].as<const char*>();
+            return false;
+        }
     }
 #ifndef UNIT_TEST
     ConfigMigration::Selection selected[4]{};
@@ -944,7 +1053,9 @@ bool ManagedConfigApplyService::combinedPreflight(std::vector<Candidate>& candid
 bool ManagedConfigApplyService::preflight(JsonVariantConst request, JsonDocument& output,
                                           String& error) {
     std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     output.clear();
+    if (!initialized_) return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, "MCP adapter allocation failed");
     std::vector<Candidate> candidates;
     if (!parseCandidates(request["operations"], candidates, output, error)) return false;
     if (!request["baseRevision"].isNull()) {
@@ -1028,6 +1139,7 @@ void ManagedConfigApplyService::serializeOperation(const OperationRecord& record
 String ManagedConfigApplyService::apply(JsonVariantConst request, JsonDocument& output,
                                         String& error) {
     std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     output.clear();
     std::vector<Candidate> candidates;
     if (!parseCandidates(request["operations"], candidates, output, error)) return output["code"].as<const char*>();
@@ -1063,6 +1175,15 @@ String ManagedConfigApplyService::apply(JsonVariantConst request, JsonDocument& 
         error = existing->error;
         return error;
     }
+    if (!initialized_) {
+        clearCandidates(candidates);
+        fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, "MCP adapter allocation failed");
+        return output["code"].as<const char*>();
+    }
+    if (checkUnknownGate(output, error)) {
+        clearCandidates(candidates);
+        return error;
+    }
     const String expectedApproval = ManagedConfigRevision::approvalHash(
         baseRevision, draftId, request["operations"]);
     if (expectedApproval.isEmpty() || approval != expectedApproval) {
@@ -1092,7 +1213,9 @@ String ManagedConfigApplyService::apply(JsonVariantConst request, JsonDocument& 
         clearCandidates(candidates);
         return code;
     }
-    if (operations_.size() >= kMaxOperationHistory) {
+    size_t operationBytes = 0;
+    for (const auto& candidate : candidates) operationBytes += 2 * measureJson(candidate.value);
+    if (operations_.size() >= kMaxOperationHistory || operationBytes > kMaxHistoryBytes - historyBytes_) {
         clearCandidates(candidates);
         fail(output, "QUOTA_EXCEEDED", error, "Operation history is full");
         return output["code"].as<const char*>();
@@ -1110,11 +1233,23 @@ String ManagedConfigApplyService::apply(JsonVariantConst request, JsonDocument& 
         return output["code"].as<const char*>();
     }
     operations_.push_back(std::move(record));
+    historyBytes_ += operationBytes;
     OperationRecord* stored = &operations_.back();
     String resultCode;
     for (size_t i = 0; i < candidates.size(); ++i) {
         StepRecord& step = stored->steps[i];
         step.section = candidates[i].adapter->section();
+#ifndef UNIT_TEST
+        step.previous = FastBee::makeJsonDocument();
+        step.expected = FastBee::makeJsonDocument();
+#endif
+        if (!step.expected.set(candidates[i].value)) {
+            operations_.pop_back();
+            historyBytes_ -= operationBytes;
+            clearCandidates(candidates);
+            fail(output, "QUOTA_EXCEEDED", error, "Recovery snapshot allocation failed");
+            return output["code"].as<const char*>();
+        }
         if (!readValue(*candidates[i].adapter, step.previous, error)) {
             step.state = "UNKNOWN";
             step.error = "READBACK_REQUIRED";
@@ -1189,6 +1324,7 @@ String ManagedConfigApplyService::apply(JsonVariantConst request, JsonDocument& 
         stored->error = "";
     } else if (stored->state == "UNKNOWN") {
         stored->error = "OUTCOME_UNKNOWN";
+        unresolvedOperationId_ = stored->id;
     }
     serializeOperation(*stored, output);
     clearCandidates(candidates);
@@ -1199,15 +1335,77 @@ String ManagedConfigApplyService::apply(JsonVariantConst request, JsonDocument& 
 bool ManagedConfigApplyService::operation(const String& operationId, JsonDocument& output,
                                           String& error) {
     std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     OperationRecord* record = findOperation(operationId);
     if (!record) return fail(output, "OPERATION_NOT_FOUND", error, "Operation is unavailable in this boot");
     serializeOperation(*record, output);
     return true;
 }
 
+bool ManagedConfigApplyService::recoverOperation(const String& operationId,
+                                                 JsonDocument& output, String& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
+    output.clear();
+    OperationRecord* record = findOperation(operationId);
+    if (!record) return fail(output, "OPERATION_NOT_FOUND", error, "Operation is unavailable in this boot");
+    if (record->state != "UNKNOWN") {
+        serializeOperation(*record, output);
+        error = "INVALID_ARGUMENT";
+        output["code"] = error;
+        return false;
+    }
+    bool proven = true;
+    bool knownFailure = false;
+    String failureCode;
+    for (size_t i = 0; i < record->stepCount; ++i) {
+        StepRecord& step = record->steps[i];
+        if (step.state == "FAILED") {
+            knownFailure = true;
+            if (failureCode.isEmpty()) failureCode = step.error;
+        }
+        if (step.state != "UNKNOWN") continue;
+        ManagedConfigSectionAdapter* adapterValue = adapter(step.section);
+        String readbackError;
+        if (!adapterValue || !adapterValue->readback(step.expected, readbackError)) {
+            proven = false;
+            break;
+        }
+        step.persisted = true;
+        step.readback = true;
+        step.state = "SUCCEEDED";
+        step.error = "";
+    }
+    if (proven) {
+        if (record->rollback) {
+            record->state = "ROLLED_BACK";
+            record->error = "";
+            if (OperationRecord* parent = findOperation(record->parentOperationId)) {
+                parent->state = "ROLLED_BACK";
+                parent->manualRecoveryRequired = false;
+            }
+        } else {
+            record->state = knownFailure ? "FAILED" : "SUCCEEDED";
+            record->error = knownFailure ? failureCode : "";
+        }
+        record->readbackRequired = false;
+        record->manualRecoveryRequired = knownFailure;
+        unresolvedOperationId_.clear();
+    } else {
+        record->state = "UNKNOWN";
+        record->error = "OUTCOME_UNKNOWN";
+        record->readbackRequired = true;
+        unresolvedOperationId_ = record->id;
+        error = "OUTCOME_UNKNOWN";
+    }
+    serializeOperation(*record, output);
+    return proven;
+}
+
 String ManagedConfigApplyService::rollback(JsonVariantConst request, JsonDocument& output,
                                            String& error) {
     std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     output.clear();
     const String id = request["operationId"].as<const char*>() ?: "";
     const String key = request["idempotencyKey"].as<const char*>() ?: "";
@@ -1226,6 +1424,11 @@ String ManagedConfigApplyService::rollback(JsonVariantConst request, JsonDocumen
         error = existing->error;
         return error;
     }
+    if (!initialized_) {
+        fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, "MCP adapter allocation failed");
+        return output["code"].as<const char*>();
+    }
+    if (checkUnknownGate(output, error)) return error;
     OperationRecord* original = findOperation(id);
     if (!original || original->rollback) {
         fail(output, "OPERATION_NOT_FOUND", error, "Operation is unavailable in this boot");
@@ -1248,6 +1451,7 @@ String ManagedConfigApplyService::rollback(JsonVariantConst request, JsonDocumen
         fail(output, "QUOTA_EXCEEDED", error, "Operation history is full");
         return output["code"].as<const char*>();
     }
+    std::vector<Candidate> restore;
     for (size_t i = original->stepCount; i-- > 0;) {
         StepRecord& prior = original->steps[i];
         if (!prior.persisted) continue;
@@ -1259,19 +1463,41 @@ String ManagedConfigApplyService::rollback(JsonVariantConst request, JsonDocumen
         size_t secretCount = 0;
         const char* const* secrets = adapterValue->secretFields(secretCount);
         stripConfiguredRecursive(prior.previous.as<JsonVariant>(), secrets, secretCount);
+        Candidate candidate;
+        candidate.adapter = adapterValue;
+        if (!candidate.value.set(prior.previous)) {
+            fail(output, "QUOTA_EXCEEDED", error, "Rollback candidate allocation failed");
+            return output["code"].as<const char*>();
+        }
+        restore.push_back(std::move(candidate));
+    }
+    JsonDocument graph;
+    if (!buildCandidateGraph(restore, graph, error)) {
+        fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, error.c_str());
+        return output["code"].as<const char*>();
+    }
+    for (auto& candidate : restore) {
         ManagedPreflightResult review;
-        if (!adapterValue->preflight(prior.previous, review, error) || !review.allowed) {
+        if (!candidate.adapter->preflightGraph(candidate.value, graph, review, error) || !review.allowed) {
             fail(output, "PREFLIGHT_FAILED", error, error.isEmpty() ? "Rollback preflight failed" : error.c_str());
             return output["code"].as<const char*>();
         }
+    }
+    size_t rollbackBytes = 0;
+    for (const auto& candidate : restore) rollbackBytes += 2 * measureJson(candidate.value);
+    if (rollbackBytes > kMaxHistoryBytes - historyBytes_) {
+        fail(output, "QUOTA_EXCEEDED", error, "Operation history is full");
+        return output["code"].as<const char*>();
     }
     OperationRecord rollbackRecord;
     rollbackRecord.id = newOperationId(key, requestHash);
     rollbackRecord.idempotencyKey = key;
     rollbackRecord.requestHash = requestHash;
+    rollbackRecord.parentOperationId = id;
     rollbackRecord.state = "ROLLING_BACK";
     rollbackRecord.rollback = true;
     operations_.push_back(std::move(rollbackRecord));
+    historyBytes_ += rollbackBytes;
     OperationRecord* rollback = &operations_.back();
     original = findOperation(id);
     String resultCode;
@@ -1282,8 +1508,11 @@ String ManagedConfigApplyService::rollback(JsonVariantConst request, JsonDocumen
         step.section = prior.section;
         step.accepted = true;
         step.state = "APPLYING";
+        step.expected.set(prior.previous);
         ManagedConfigSectionAdapter* adapterValue = adapter(prior.section);
         ManagedAdapterApplyResult applied = adapterValue->apply(prior.previous, error);
+        step.pendingRestart = prior.pendingRestart || applied.pendingRestart;
+        rollback->pendingRestart = rollback->pendingRestart || step.pendingRestart;
         if (applied.status == ManagedAdapterApplyStatus::SaveFailed ||
             applied.status == ManagedAdapterApplyStatus::Rejected ||
             applied.status == ManagedAdapterApplyStatus::Unknown) {
@@ -1313,6 +1542,8 @@ String ManagedConfigApplyService::rollback(JsonVariantConst request, JsonDocumen
         rollback->state = "ROLLED_BACK";
         original->state = "ROLLED_BACK";
         original->manualRecoveryRequired = false;
+    } else if (rollback->state == "UNKNOWN") {
+        unresolvedOperationId_ = rollback->id;
     }
     serializeOperation(*rollback, output);
     error = resultCode;
@@ -1320,15 +1551,37 @@ String ManagedConfigApplyService::rollback(JsonVariantConst request, JsonDocumen
 }
 
 bool ManagedConfigApplyService::storeSecret(const String& secretRef, const String& value,
-                                            String& error) {
-    if (secretRef.length() > 96 || value.length() > 1024 || secretRef.isEmpty()) {
+                                            const String& idempotencyKey, String& error) {
+    if (secretRef.length() > 96 || value.length() > 1024 || secretRef.isEmpty() ||
+        idempotencyKey.isEmpty() || idempotencyKey.length() > 80) {
         error = "INVALID_ARGUMENT";
         return false;
     }
     std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
+    const String requestHash = ManagedConfigRevision::sha256(
+        std::string(secretRef.c_str()) + "\n" + value.c_str());
+    for (const auto& record : secrets_) {
+        if (record.key != idempotencyKey) continue;
+        if (record.requestHash != requestHash) {
+            error = "IDEMPOTENCY_CONFLICT";
+            return false;
+        }
+        return true;
+    }
+    JsonDocument gate;
+    if (!initialized_) {
+        error = "DEVICE_CHANNEL_UNAVAILABLE";
+        return false;
+    }
+    if (checkUnknownGate(gate, error)) return false;
     const int separator = secretRef.indexOf('.');
     if (separator <= 0) {
         error = "INVALID_ARGUMENT";
+        return false;
+    }
+    if (secrets_.size() >= kMaxOperationHistory) {
+        error = "QUOTA_EXCEEDED";
         return false;
     }
     ManagedConfigSectionAdapter* adapterValue = adapter(secretRef.substring(0, separator));
@@ -1336,6 +1589,7 @@ bool ManagedConfigApplyService::storeSecret(const String& secretRef, const Strin
         if (error.isEmpty()) error = "CAPABILITY_UNSUPPORTED";
         return false;
     }
+    secrets_.push_back({idempotencyKey, requestHash});
     return true;
 }
 

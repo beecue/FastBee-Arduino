@@ -11,6 +11,7 @@
 #include "protocols/MQTTClient.h"
 #include "utils/PsramJsonDocument.h"
 #include "./network/WebConfigManager.h"
+#include "network/SameOrigin.h"
 #include <esp_heap_caps.h>
 
 // ROM 日志函数：不走 newlib / 不加锁 / 不分配内存。OOM 拒绝路径上
@@ -284,6 +285,22 @@ bool WebHandlerContext::requireDeveloperMode(AsyncWebServerRequest* request) {
         return true;
     }
     sendError(request, 403, "Developer mode is disabled");
+    return false;
+}
+
+bool WebHandlerContext::requireSameOrigin(AsyncWebServerRequest* request) {
+    String method;
+    switch (request->method()) {
+        case HTTP_POST: method = "POST"; break;
+        case HTTP_PUT: method = "PUT"; break;
+        case HTTP_PATCH: method = "PATCH"; break;
+        case HTTP_DELETE: method = "DELETE"; break;
+        default: return true;
+    }
+    const String origin = request->hasHeader("Origin") ? request->header("Origin") : String();
+    const String host = request->hasHeader("Host") ? request->header("Host") : String();
+    if (FastBee::isSameOriginRequest(method, origin, host)) return true;
+    sendError(request, 403, "Cross-origin request denied");
     return false;
 }
 

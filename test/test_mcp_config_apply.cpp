@@ -7,8 +7,15 @@
 
 #include "core/ManagedConfigRevision.h"
 #include "core/ManagedConfigApplyService.h"
+#include "network/ProtocolConfigValidation.h"
+#include "network/SameOrigin.h"
 #include "../src/core/ManagedConfigRevision.cpp"
 #include "../src/core/ManagedConfigApplyService.cpp"
+
+#ifndef TEST_ASSERT_NOT_EQUAL_STRING
+#define TEST_ASSERT_NOT_EQUAL_STRING(expected, actual) \
+    TEST_ASSERT_TRUE_MESSAGE(std::strcmp((expected), (actual)) != 0, "Strings must differ")
+#endif
 
 namespace {
 
@@ -18,7 +25,7 @@ JsonDocument parse(const char* text) {
     return document;
 }
 
-class FakeAdapter final : public FastBee::ManagedConfigSectionAdapter {
+class FakeAdapter : public FastBee::ManagedConfigSectionAdapter {
 public:
     FakeAdapter(const char* name, uint32_t schema = 1, bool readOnly = false)
         : name_(name), schema_(schema), readOnly_(readOnly) { state_.to<JsonObject>(); }
@@ -71,6 +78,27 @@ public:
         return true;
     }
 
+    bool preflightGraph(JsonVariantConst candidate, JsonVariantConst graph,
+                        FastBee::ManagedPreflightResult& result, String& error) override {
+        if (name_ == "protocol" && candidate["modbusRtu"]["enabled"] == true) {
+            const bool featureEnabled = graph["features"]["features"]["modbus"]["enabled"] == true;
+            const String uartId = candidate["modbusRtu"]["peripheralId"] | "";
+            bool uartEnabled = false;
+            for (JsonObjectConst peripheral : graph["peripherals"]["peripherals"].as<JsonArrayConst>()) {
+                if (peripheral["id"] == uartId && peripheral["type"] == 1 && peripheral["enabled"] == true) {
+                    uartEnabled = true;
+                }
+            }
+            if (!featureEnabled || !uartEnabled) {
+                result.allowed = false;
+                result.error = "MIGRATION_PROTOCOL_UART_MISSING";
+                error = result.error;
+                return false;
+            }
+        }
+        return preflight(candidate, result, error);
+    }
+
     FastBee::ManagedAdapterApplyResult apply(JsonVariantConst candidate,
                                               String& error) override {
         ++applyCalls;
@@ -92,6 +120,14 @@ public:
             if (state_[field] == "********") state_[field] = secrets[field];
         }
         const bool restart = candidate["pendingRestart"] == true;
+        if (unknownAfterSuccessfulCalls > 0 && applyCalls > unknownAfterSuccessfulCalls) {
+            mismatchNextReadback = true;
+            return {FastBee::ManagedAdapterApplyStatus::Unknown, restart, "OUTCOME_UNKNOWN"};
+        }
+        if (candidate["applyUnknownPersisted"] == true) {
+            if (candidate["deferUnknownReadback"] == true) mismatchNextReadback = true;
+            return {FastBee::ManagedAdapterApplyStatus::Unknown, restart, "OUTCOME_UNKNOWN"};
+        }
         return {restart ? FastBee::ManagedAdapterApplyStatus::PendingRestart
                         : FastBee::ManagedAdapterApplyStatus::Persisted,
                 restart, ""};
@@ -128,6 +164,14 @@ public:
         return secretFields_.empty() ? nullptr : secretFields_.data();
     }
 
+    bool writeSecret(const String& secretRef, const String& value, String& error) override {
+        (void)secretRef;
+        (void)value;
+        (void)error;
+        ++secretCalls;
+        return true;
+    }
+
     String name_;
     uint32_t schema_;
     bool readOnly_;
@@ -139,6 +183,8 @@ public:
     int preflightCalls = 0;
     int applyCalls = 0;
     int readbackCalls = 0;
+    int secretCalls = 0;
+    int unknownAfterSuccessfulCalls = 0;
     bool mismatchNextReadback = false;
     std::vector<String>* lastOrder = nullptr;
 };
@@ -201,12 +247,18 @@ void test_revision_canonical_and_content_derived() {
     TEST_ASSERT_EQUAL_STRING(hashA.c_str(), hashB.c_str());
     TEST_ASSERT_EQUAL(64, hashA.length());
     reordered["b"] = 3;
-    TEST_ASSERT_NOT_EQUAL(hashA.c_str(), FastBee::ManagedConfigRevision::sectionHash(reordered).c_str());
+    TEST_ASSERT_NOT_EQUAL_STRING(hashA.c_str(), FastBee::ManagedConfigRevision::sectionHash(reordered).c_str());
+    TEST_ASSERT_EQUAL_STRING("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                             FastBee::ManagedConfigRevision::sha256("abc").c_str());
 
-    std::vector<std::pair<String, String>> sections{{"protocol", "b"}, {"features", "a"}};
+    const String changedHash = FastBee::ManagedConfigRevision::sectionHash(reordered);
+    std::vector<std::pair<String, String>> sections{{"protocol", hashB}, {"features", hashA}};
     const String globalA = FastBee::ManagedConfigRevision::globalRevision(sections);
-    sections[0].second = "changed";
-    TEST_ASSERT_NOT_EQUAL(globalA.c_str(), FastBee::ManagedConfigRevision::globalRevision(sections).c_str());
+    TEST_ASSERT_EQUAL(64, globalA.length());
+    sections[0].second = changedHash;
+    const String globalB = FastBee::ManagedConfigRevision::globalRevision(sections);
+    TEST_ASSERT_EQUAL(64, globalB.length());
+    TEST_ASSERT_NOT_EQUAL_STRING(globalA.c_str(), globalB.c_str());
 }
 
 void test_snapshot_is_redacted_and_read_only_sections_cannot_apply() {
@@ -404,9 +456,10 @@ void test_readback_mismatch_is_unknown_and_pending_restart_is_not_observed() {
     TEST_ASSERT_EQUAL_STRING("OUTCOME_UNKNOWN", fixture.service.apply(mismatch, result, error).c_str());
     TEST_ASSERT_EQUAL_STRING("UNKNOWN", result["state"]);
 
-    JsonDocument pending = applyBody(fixture,
+    Fixture pendingFixture;
+    JsonDocument pending = applyBody(pendingFixture,
         "[{\"section\":\"peripherals\",\"schemaVersion\":1,\"patch\":{\"pendingRestart\":true}}]", "key-pending");
-    TEST_ASSERT_TRUE(fixture.service.apply(pending, result, error).isEmpty());
+    TEST_ASSERT_TRUE(pendingFixture.service.apply(pending, result, error).isEmpty());
     TEST_ASSERT_TRUE(result["pendingRestart"]);
     TEST_ASSERT_TRUE(result["steps"][0]["pendingRestart"]);
     TEST_ASSERT_FALSE(result["steps"][0]["observed"]);
@@ -429,6 +482,182 @@ void test_new_boot_has_no_replayable_operation_or_automatic_rollback() {
     TEST_ASSERT_FALSE(afterRestart.operation(result["operationId"].as<const char*>(), lookup, error));
     TEST_ASSERT_EQUAL(applyCalls, fixture.features.applyCalls);
     TEST_ASSERT_EQUAL(readbackCalls, fixture.features.readbackCalls);
+}
+
+void test_protocol_candidate_semantics_are_validated() {
+    JsonDocument valid = parse(
+        "{\"version\":1,\"mqtt\":{\"enabled\":true,\"scheme\":\"mqtts\",\"port\":8883,"
+        "\"keepAlive\":60,\"publishTopics\":[],\"subscribeTopics\":[]},"
+        "\"modbusRtu\":{\"enabled\":true,\"mode\":\"master\",\"transferType\":0,"
+        "\"master\":{\"tasks\":[{\"slaveAddress\":1,\"functionCode\":3,\"quantity\":2,"
+        "\"mappings\":[{\"regOffset\":0,\"dataType\":0,\"sensorId\":\"temperature\"}]}],\"devices\":[]}},"
+        "\"coap\":{\"enabled\":false}}");
+    String error;
+    TEST_ASSERT_TRUE(FastBee::validateProtocolConfigDocument(valid, error));
+    JsonDocument invalid = parse("{\"mqtt\":{\"scheme\":\"http\",\"port\":0}}");
+    TEST_ASSERT_FALSE(FastBee::validateProtocolConfigDocument(invalid, error));
+    invalid = parse("{\"mqtt\":{\"enabled\":\"true\",\"scheme\":\"mqtt\",\"port\":1883}}");
+    TEST_ASSERT_FALSE(FastBee::validateProtocolConfigDocument(invalid, error));
+    invalid = parse("{\"modbusRtu\":{\"transferType\":2}}");
+    TEST_ASSERT_FALSE(FastBee::validateProtocolConfigDocument(invalid, error));
+    invalid = parse("{\"modbusRtu\":{\"master\":{\"tasks\":[{\"functionCode\":9}]}}}");
+    TEST_ASSERT_FALSE(FastBee::validateProtocolConfigDocument(invalid, error));
+    invalid = parse("{\"coap\":true}");
+    TEST_ASSERT_FALSE(FastBee::validateProtocolConfigDocument(invalid, error));
+}
+
+void test_unknown_gates_writes_until_readonly_recovery_proves_outcome() {
+    Fixture fixture;
+    JsonDocument body = applyBody(fixture,
+        "[{\"section\":\"features\",\"schemaVersion\":1,\"patch\":{\"applyUnknownPersisted\":true,\"deferUnknownReadback\":true}}]",
+        "unknown-gate");
+    JsonDocument result;
+    String error;
+    TEST_ASSERT_EQUAL_STRING("OUTCOME_UNKNOWN", fixture.service.apply(body, result, error).c_str());
+    const String operationId = result["operationId"].as<const char*>();
+    JsonDocument later = applyBody(fixture,
+        "[{\"section\":\"peripherals\",\"schemaVersion\":1,\"patch\":{\"enabled\":true}}]",
+        "after-unknown");
+    TEST_ASSERT_EQUAL_STRING("OUTCOME_UNKNOWN", fixture.service.apply(later, result, error).c_str());
+    TEST_ASSERT_EQUAL(0, fixture.peripherals.applyCalls);
+    TEST_ASSERT_FALSE(fixture.service.storeSecret("protocol.mqtt.password", "new-secret", "secret-1", error));
+    TEST_ASSERT_EQUAL(0, fixture.protocol.secretCalls);
+
+    TEST_ASSERT_TRUE(fixture.service.recoverOperation(operationId, result, error));
+    TEST_ASSERT_EQUAL_STRING("SUCCEEDED", result["state"]);
+    TEST_ASSERT_TRUE(fixture.service.storeSecret("protocol.mqtt.password", "new-secret", "secret-1", error));
+    TEST_ASSERT_EQUAL(1, fixture.protocol.secretCalls);
+    TEST_ASSERT_TRUE(fixture.service.storeSecret("protocol.mqtt.password", "new-secret", "secret-1", error));
+    TEST_ASSERT_EQUAL(1, fixture.protocol.secretCalls);
+    TEST_ASSERT_TRUE(fixture.service.apply(later, result, error).isEmpty());
+    TEST_ASSERT_EQUAL(1, fixture.peripherals.applyCalls);
+}
+
+void test_unresolved_unknown_remains_blocked_when_readback_does_not_match() {
+    Fixture fixture;
+    JsonDocument body = applyBody(fixture,
+        "[{\"section\":\"features\",\"schemaVersion\":1,\"patch\":{\"applyUnknown\":true}}]",
+        "unknown-unresolved");
+    JsonDocument result;
+    String error;
+    fixture.service.apply(body, result, error);
+    const String operationId = result["operationId"].as<const char*>();
+    TEST_ASSERT_FALSE(fixture.service.recoverOperation(operationId, result, error));
+    TEST_ASSERT_EQUAL_STRING("UNKNOWN", result["state"]);
+    TEST_ASSERT_FALSE(fixture.service.storeSecret("protocol.mqtt.password", "new-secret", "secret-2", error));
+    TEST_ASSERT_EQUAL(0, fixture.protocol.secretCalls);
+}
+
+void test_cross_section_preflight_uses_candidate_dependency_graph() {
+    Fixture fixture;
+    const char* operations =
+        "[{\"section\":\"periphExec\",\"schemaVersion\":1,\"patch\":{\"enabled\":false}},"
+        "{\"section\":\"protocol\",\"schemaVersion\":1,\"patch\":{\"modbusRtu\":{\"enabled\":true,\"mode\":\"master\",\"peripheralId\":\"uart-candidate\"}}},"
+        "{\"section\":\"features\",\"schemaVersion\":1,\"patch\":{\"features\":{\"modbus\":{\"enabled\":true}}}},"
+        "{\"section\":\"peripherals\",\"schemaVersion\":1,\"patch\":{\"peripherals\":[{\"id\":\"uart-candidate\",\"type\":1,\"enabled\":true}]}}]";
+    JsonDocument body = applyBody(fixture, operations, "candidate-graph");
+    JsonDocument result;
+    String error;
+    TEST_ASSERT_TRUE(fixture.service.apply(body, result, error).isEmpty());
+
+    Fixture missing;
+    JsonDocument blocked = applyBody(missing,
+        "[{\"section\":\"protocol\",\"schemaVersion\":1,\"patch\":{\"modbusRtu\":{\"enabled\":true,\"mode\":\"master\",\"peripheralId\":\"uart-candidate\"}}}]",
+        "candidate-graph-missing");
+    TEST_ASSERT_EQUAL_STRING("PREFLIGHT_FAILED", missing.service.apply(blocked, result, error).c_str());
+    TEST_ASSERT_EQUAL(0, missing.protocol.applyCalls);
+}
+
+class ChangingAdapter final : public FakeAdapter {
+public:
+    ChangingAdapter() : FakeAdapter("features") { state_["value"] = 0; }
+    bool readRedacted(JsonDocument& output, String& error) override {
+        state_["value"] = state_["value"].as<int>() + 1;
+        return FakeAdapter::readRedacted(output, error);
+    }
+};
+
+void test_snapshot_hashes_and_values_share_one_consistent_read_set() {
+    FastBee::ManagedConfigApplyService service(false);
+    ChangingAdapter changing;
+    service.registerAdapter(&changing);
+    JsonDocument snapshot;
+    String error;
+    TEST_ASSERT_TRUE(service.snapshot({}, snapshot, error));
+    std::vector<std::pair<String, String>> hashes;
+    hashes.emplace_back("features", snapshot["sections"]["features"]["hash"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING(FastBee::ManagedConfigRevision::globalRevision(hashes).c_str(),
+                             snapshot["revision"].as<const char*>());
+}
+
+void test_aggregate_candidate_budget_rejects_before_any_write() {
+    Fixture fixture;
+    JsonDocument body = applyBody(fixture, "[]", "aggregate-budget");
+    JsonArray operations = body["operations"].as<JsonArray>();
+    for (const char* section : {"features", "peripherals", "protocol", "ruleScripts"}) {
+        JsonObject row = operations.add<JsonObject>();
+        row["section"] = section;
+        row["schemaVersion"] = 1;
+        row["patch"]["blob"] = std::string(25000, 'x');
+    }
+    body["approvalHash"] = FastBee::ManagedConfigRevision::approvalHash(
+        body["baseRevision"].as<const char*>(), body["draftId"].as<const char*>(), operations);
+    JsonDocument result;
+    String error;
+    TEST_ASSERT_EQUAL_STRING("QUOTA_EXCEEDED", fixture.service.apply(body, result, error).c_str());
+    TEST_ASSERT_EQUAL(0, fixture.features.applyCalls);
+    TEST_ASSERT_EQUAL(0, fixture.peripherals.applyCalls);
+    TEST_ASSERT_EQUAL(0, fixture.protocol.applyCalls);
+    TEST_ASSERT_EQUAL(0, fixture.rules.applyCalls);
+}
+
+void test_rollback_propagates_pending_restart() {
+    Fixture fixture;
+    JsonDocument body = applyBody(fixture,
+        "[{\"section\":\"features\",\"schemaVersion\":1,\"patch\":{\"pendingRestart\":true}}]",
+        "restart-original");
+    JsonDocument result;
+    String error;
+    TEST_ASSERT_TRUE(fixture.service.apply(body, result, error).isEmpty());
+    JsonDocument rollback;
+    rollback["operationId"] = result["operationId"];
+    rollback["idempotencyKey"] = "restart-rollback";
+    rollback["approvalHash"] = FastBee::ManagedConfigRevision::rollbackApprovalHash(
+        rollback["operationId"].as<const char*>(), revision(fixture));
+    TEST_ASSERT_TRUE(fixture.service.rollback(rollback, result, error).isEmpty());
+    TEST_ASSERT_TRUE(result["pendingRestart"]);
+    TEST_ASSERT_TRUE(result["steps"][0]["pendingRestart"]);
+}
+
+void test_rollback_unknown_recovers_to_rolled_back_without_replay() {
+    Fixture fixture;
+    fixture.features.unknownAfterSuccessfulCalls = 1;
+    JsonDocument body = applyBody(fixture,
+        "[{\"section\":\"features\",\"schemaVersion\":1,\"patch\":{\"pendingRestart\":true}}]",
+        "rollback-unknown-original");
+    JsonDocument result;
+    String error;
+    TEST_ASSERT_TRUE(fixture.service.apply(body, result, error).isEmpty());
+    const String originalId = result["operationId"].as<const char*>();
+    JsonDocument rollback;
+    rollback["operationId"] = originalId;
+    rollback["idempotencyKey"] = "rollback-unknown";
+    rollback["approvalHash"] = FastBee::ManagedConfigRevision::rollbackApprovalHash(
+        originalId, revision(fixture));
+    TEST_ASSERT_EQUAL_STRING("OUTCOME_UNKNOWN", fixture.service.rollback(rollback, result, error).c_str());
+    const String rollbackId = result["operationId"].as<const char*>();
+    const int applyCalls = fixture.features.applyCalls;
+    TEST_ASSERT_FALSE(fixture.service.recoverOperation(rollbackId, result, error));
+    TEST_ASSERT_EQUAL_STRING("UNKNOWN", result["state"]);
+    TEST_ASSERT_TRUE(fixture.service.recoverOperation(rollbackId, result, error));
+    TEST_ASSERT_EQUAL_STRING("ROLLED_BACK", result["state"]);
+    TEST_ASSERT_EQUAL(applyCalls, fixture.features.applyCalls);
+}
+
+void test_same_origin_rejects_cross_origin_mutation() {
+    TEST_ASSERT_TRUE(FastBee::isSameOriginRequest("POST", "http://device.local", "device.local"));
+    TEST_ASSERT_FALSE(FastBee::isSameOriginRequest("POST", "http://evil.example/device.local", "device.local"));
+    TEST_ASSERT_FALSE(FastBee::isSameOriginRequest("POST", "http://device.local.evil.example", "device.local"));
 }
 
 void test_nested_secret_values_require_secret_channel() {
@@ -472,6 +701,15 @@ void test_mcp_config_apply_group() {
     RUN_TEST(test_unknown_apply_uses_single_readback_and_never_replays);
     RUN_TEST(test_readback_mismatch_is_unknown_and_pending_restart_is_not_observed);
     RUN_TEST(test_new_boot_has_no_replayable_operation_or_automatic_rollback);
+    RUN_TEST(test_protocol_candidate_semantics_are_validated);
+    RUN_TEST(test_unknown_gates_writes_until_readonly_recovery_proves_outcome);
+    RUN_TEST(test_unresolved_unknown_remains_blocked_when_readback_does_not_match);
+    RUN_TEST(test_cross_section_preflight_uses_candidate_dependency_graph);
+    RUN_TEST(test_snapshot_hashes_and_values_share_one_consistent_read_set);
+    RUN_TEST(test_aggregate_candidate_budget_rejects_before_any_write);
+    RUN_TEST(test_rollback_propagates_pending_restart);
+    RUN_TEST(test_rollback_unknown_recovers_to_rolled_back_without_replay);
+    RUN_TEST(test_same_origin_rejects_cross_origin_mutation);
     RUN_TEST(test_nested_secret_values_require_secret_channel);
     RUN_TEST(test_operation_and_body_bounds_are_explicit);
 }

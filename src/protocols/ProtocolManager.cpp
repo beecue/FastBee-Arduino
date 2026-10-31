@@ -1856,6 +1856,14 @@ bool ProtocolManager::restartModbusDeferred() {
     return true;
 }
 
+bool ProtocolManager::requestModbusStopAsync() {
+    ModbusLifecycleGuard lifecycle(modbusLifecycleMutex, pdMS_TO_TICKS(100));
+    if (!lifecycle.isLocked() || modbusShutdownPending) return false;
+    modbusRestartPending = false;
+    modbusStopPending = true;
+    return true;
+}
+
 bool ProtocolManager::consumeModbusRestartResult(ModbusRestartResult& result) {
     if (!modbusRestartResultAvailable) {
         return false;

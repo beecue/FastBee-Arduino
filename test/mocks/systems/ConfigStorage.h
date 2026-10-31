@@ -3,12 +3,17 @@
 
 #include <ArduinoJson.h>
 #include <LittleFS.h>
+#include <mutex>
 
 class ConfigStorage {
 public:
     static ConfigStorage& getInstance() {
         static ConfigStorage instance;
         return instance;
+    }
+    static std::recursive_mutex& transactionMutex() {
+        static std::recursive_mutex mutex;
+        return mutex;
     }
 
     void setSaveFailureCount(unsigned int count) {

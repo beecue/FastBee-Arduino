@@ -10,6 +10,7 @@
 #if FASTBEE_ENABLE_PERIPH_EXEC
 
 #include "core/PeriphExecManager.h"
+#include "systems/ConfigTransaction.h"
 #include "core/RuleOutputIdentity.h"
 #include "core/NativeOutputDispatch.h"
 #include "core/ActionReportPayload.h"
@@ -1165,6 +1166,7 @@ bool PeriphExecManager::disableRuleAndSave(const String& id, String& errorMsg) {
 bool PeriphExecManager::applyRuleMutationTransactional(
     RuleMutationType operation, const String& id,
     const PeriphExecRule* rule, String& errorMsg) {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     errorMsg = "";
     MutexGuard lock(_rulesMutex,
                     pdMS_TO_TICKS(PERIPH_EXEC_RULE_MUTATION_LOCK_TIMEOUT_MS));

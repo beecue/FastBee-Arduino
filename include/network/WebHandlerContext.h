@@ -101,6 +101,7 @@ public:
     bool       isDeveloperModeEnabled();
     bool       verifyCurrentUserPassword(AsyncWebServerRequest* request, const String& password);
     bool       requireDeveloperMode(AsyncWebServerRequest* request);
+    bool       requireSameOrigin(AsyncWebServerRequest* request);
 
     // ============ 响应辅助方法 ============
     void sendJsonResponse(AsyncWebServerRequest* request, int code,

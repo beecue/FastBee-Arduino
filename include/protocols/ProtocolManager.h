@@ -204,6 +204,7 @@ public:
      * 用于 HTTP handler 中避免在 AsyncTCP 小栈任务中执行
      */
     bool restartModbusDeferred();
+    bool requestModbusStopAsync();
 
     // 延迟重启是否仍在等待 loopTask 消费。用于内存恢复路径避免在
     // handler 实际重建前重复排队或提前清除“Modbus 已停止”状态。

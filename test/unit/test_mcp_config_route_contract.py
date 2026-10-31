@@ -81,6 +81,29 @@ class McpConfigRouteContractTests(unittest.TestCase):
         self.assertNotIn("SystemRebooter", source)
         self.assertNotIn("ESP.restart", source)
 
+    def test_mutation_admission_body_cleanup_and_protocol_lifecycle(self):
+        source = read(HANDLER_CPP)
+        self.assertIn("requireSameOrigin", function_body(source, r"McpConfigRouteHandler::admit\s*\("))
+        self.assertIn("using BodyOwner = std::unique_ptr<BodyBuffer>", source)
+        self.assertIn("onDisconnect", source)
+        self.assertIn("requestModbusStopAsync", read(SERVICE_CPP))
+        self.assertNotIn("manager_->stopModbus()", read(SERVICE_CPP))
+        for handler in ("setupRoutes", "handleRollback", "handleSecret"):
+            body = function_body(source, rf"McpConfigRouteHandler::{handler}\s*\(")
+            self.assertIn("setProtocolManager", body)
+        self.assertIn('"/api/mcp/config/readback"', source)
+        self.assertIn("recoverOperation", source)
+        self.assertIn("idempotencyKey", function_body(source, r"McpConfigRouteHandler::handleSecret\s*\("))
+
+    def test_migration_transaction_and_staging_use_existing_facility(self):
+        source = read(SERVICE_CPP)
+        self.assertIn("ConfigMigration::Storage::slotPath", source)
+        self.assertNotIn("periph_exec.mcp.staged.json", source)
+        self.assertNotIn("deleteJSONConfigGenerations", source)
+        migration = read(ROOT / "include/systems/ConfigMigrationStorage.h")
+        self.assertIn("ConfigTransaction::mutex", migration)
+        self.assertIn("validateProtocolConfigDocument", read(ROOT / "src/systems/ConfigStorage.cpp"))
+
     def test_successful_apply_and_rollback_use_http_200(self):
         source = read(HANDLER_CPP)
         for handler in ("handleApply", "handleRollback"):

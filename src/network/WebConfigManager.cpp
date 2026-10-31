@@ -158,21 +158,7 @@ bool WebConfigManager::initialize() {
         const WebRequestMethodComposite method = request->method();
         const bool unsafe = method == HTTP_POST || method == HTTP_PUT ||
                             method == HTTP_PATCH || method == HTTP_DELETE;
-        if (unsafe && request->hasHeader("Origin")) {
-            const String origin = request->header("Origin");
-            const String host = request->header("Host");
-            // Compare the complete origin. Suffix matching would allow a hostile
-            // origin such as http://attacker<host> to pass the CSRF check.
-            const bool sameOrigin = !host.isEmpty() &&
-                                    (origin == (String("http://") + host) ||
-                                     origin == (String("https://") + host));
-            if (!sameOrigin && origin != "http://fastbee.local" &&
-                origin != "https://fastbee.local") {
-                request->send(403, "application/json",
-                              "{\"success\":false,\"error\":\"Cross-origin request denied\"}");
-                return;
-            }
-        }
+        if (unsafe && !ctx->requireSameOrigin(request)) return;
         uint32_t retryAfterSec = 1;
         if (checkIpRateLimit(request, retryAfterSec)) {
             next();

@@ -14,6 +14,7 @@
 #include "systems/ConfigStorage.h"
 #include "systems/ProtocolConfigGuard.h"
 #include "systems/ConfigMigrationStorage.h"
+#include "network/ProtocolConfigValidation.h"
 #include "systems/LoggerSystem.h"
 #include "core/FeatureFlags.h"
 #include "utils/SharedJsonSerializer.h"
@@ -223,16 +224,22 @@ bool ConfigStorage::removeKey(const String& key) {
 // ── JSON 文件接口 ─────────────────────────────────────────────────────────────
 
 bool ConfigStorage::saveJSONConfig(const String& filename, const JsonDocument& config) {
+    std::lock_guard<std::recursive_mutex> transaction(transactionMutex());
     FastBee::ProtocolConfigGuard guard(filename == FileSystem::PROTOCOL_CONFIG_FILE);
     return guard && saveJSONConfigImpl(filename, config);
 }
 
 bool ConfigStorage::saveImportedJSONConfig(const String& filename, const JsonDocument& config) {
+    std::lock_guard<std::recursive_mutex> transaction(transactionMutex());
     FastBee::ProtocolConfigGuard guard(filename == FileSystem::PROTOCOL_CONFIG_FILE);
     return guard && saveJSONConfigImpl(filename, config, true);
 }
 
 bool ConfigStorage::saveJSONConfigImpl(const String& filename, const JsonDocument& config, bool forceImmediate) {
+    if (filename == FileSystem::PROTOCOL_CONFIG_FILE) {
+        String validationError;
+        if (!FastBee::validateProtocolConfigDocument(config, validationError)) return false;
+    }
     if (config.overflowed()) return false;
     if (!_initialized && !initializeInternal()) return false;
 #if FASTBEE_ENABLE_STORAGE_CACHE
@@ -292,6 +299,7 @@ bool ConfigStorage::saveJSONConfigImpl(const String& filename, const JsonDocumen
 }
 
 bool ConfigStorage::saveFactoryJSONConfig(const String& filename, const char* jsonContent) {
+    std::lock_guard<std::recursive_mutex> transaction(transactionMutex());
     FastBee::ProtocolConfigGuard guard(filename == FileSystem::PROTOCOL_CONFIG_FILE);
     if (!guard) return false;
     if (!_initialized && !initializeInternal()) return false;
@@ -346,6 +354,7 @@ bool ConfigStorage::saveFactoryJSONConfig(const String& filename, const char* js
 }
 
 bool ConfigStorage::deleteJSONConfigGenerations(const String& filename) {
+    std::lock_guard<std::recursive_mutex> transaction(transactionMutex());
     FastBee::ProtocolConfigGuard guard(filename == FileSystem::PROTOCOL_CONFIG_FILE);
     if (!guard) return false;
     if (!_initialized && !initializeInternal()) return false;
@@ -380,6 +389,7 @@ bool ConfigStorage::deleteJSONConfigGenerations(const String& filename) {
 }
 
 bool ConfigStorage::loadJSONConfig(const String& filename, JsonDocument& config) {
+    std::lock_guard<std::recursive_mutex> transaction(transactionMutex());
     FastBee::ProtocolConfigGuard guard(filename == FileSystem::PROTOCOL_CONFIG_FILE);
     return guard && loadJSONConfigImpl(filename, config);
 }
@@ -468,6 +478,7 @@ bool ConfigStorage::loadJSONConfigImpl(const String& filename, JsonDocument& con
 // ── 特定配置快捷接口 ─────────────────────────────────────────────────────────
 
 bool ConfigStorage::compareExchangeMqttConfig(JsonVariantConst expected, JsonVariantConst desired) {
+    std::lock_guard<std::recursive_mutex> transaction(transactionMutex());
     if (!expected.is<JsonObjectConst>() || !desired.is<JsonObjectConst>()) return false;
     FastBee::ProtocolConfigGuard guard;
     if (!guard) return false;
@@ -496,6 +507,7 @@ bool ConfigStorage::loadProtocolSection(const String& section, JsonDocument& out
 // 通用分段加载：从任意 JSON 文件中仅反序列化指定顶层 section
 // 使用 ArduinoJson Filter 机制，堆峰值仅为对应子节点实际体积，而非整文件
 bool ConfigStorage::loadConfigSection(const char* filename, const String& section, JsonDocument& outDoc) {
+    std::lock_guard<std::recursive_mutex> transaction(transactionMutex());
     FastBee::ProtocolConfigGuard guard(String(filename) == FileSystem::PROTOCOL_CONFIG_FILE);
     if (!guard) return false;
     if (!_initialized && !initializeInternal()) {
@@ -595,6 +607,7 @@ void ConfigStorage::listConfigFiles() {
 }
 
 bool ConfigStorage::deleteConfigFile(const String& filename) {
+    std::lock_guard<std::recursive_mutex> transaction(transactionMutex());
     FastBee::ProtocolConfigGuard guard(filename == FileSystem::PROTOCOL_CONFIG_FILE);
     if (!guard) return false;
 #if FASTBEE_ENABLE_STORAGE_CACHE

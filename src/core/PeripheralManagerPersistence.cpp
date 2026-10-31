@@ -12,6 +12,7 @@
 #include "core/H1ParameterContract.h"
 #include "utils/FileUtils.h"
 #include "systems/LoggerSystem.h"
+#include "systems/ConfigTransaction.h"
 #include "PeripheralManagerConfigHelpers.h"
 #include "core/PeripheralResourcePlanner.h"
 #include "utils/CheckedText.h"
@@ -735,6 +736,7 @@ bool validateImportedPeripheralRelations(const std::vector<PeripheralConfig>& ca
 } // namespace
 
 bool PeripheralManager::configurationImportPending() const {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     RecursiveMutexGuard lock(_mutex, pdMS_TO_TICKS(50));
     return !lock.isLocked() || _configurationImportPending;
 }
@@ -742,6 +744,7 @@ bool PeripheralManager::configurationImportPending() const {
 bool PeripheralManager::prepareConfigurationImport(JsonDocument& document,
         std::vector<PeripheralConfig>& candidates, const FastBee::PreflightContext& context,
         FastBee::PreflightResult& result, String& error) {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     RecursiveMutexGuard lock(_mutex, pdMS_TO_TICKS(50));
     candidates.clear(); result.reset(); error = "";
     if (!lock.isLocked() || _configurationImportPending || !_configurationReviewVersion) {
@@ -806,6 +809,7 @@ bool PeripheralManager::prepareConfigurationImport(JsonDocument& document,
 }
 
 bool PeripheralManager::commitConfigurationImport(JsonDocument& document, uint64_t expectedVersion, String& error) {
+    std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     RecursiveMutexGuard lock(_mutex, pdMS_TO_TICKS(50));
     if (!lock.isLocked() || _configurationImportPending || !expectedVersion ||
         expectedVersion != _configurationReviewVersion) {

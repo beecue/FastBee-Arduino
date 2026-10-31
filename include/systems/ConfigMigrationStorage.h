@@ -1,5 +1,6 @@
 #pragma once
 #include "systems/ConfigMigrationJournal.h"
+#include "systems/ConfigTransaction.h"
 #include <Arduino.h>
 #include <atomic>
 
@@ -8,9 +9,11 @@ namespace FastBee { namespace ConfigMigration {
 // reboot recovery runs before handlers/tasks and takes the same guard.
 class Guard {
     static std::atomic_flag& gate() {static std::atomic_flag value=ATOMIC_FLAG_INIT;return value;}
+    std::lock_guard<std::recursive_mutex> transaction_;
     bool held;
 public:
-    Guard():held(!gate().test_and_set(std::memory_order_acquire)){}
+    Guard():transaction_(FastBee::ConfigTransaction::mutex()),
+        held(!gate().test_and_set(std::memory_order_acquire)){}
     ~Guard(){if(held)gate().clear(std::memory_order_release);}
     explicit operator bool()const{return held;}
     Guard(const Guard&)=delete;Guard& operator=(const Guard&)=delete;
