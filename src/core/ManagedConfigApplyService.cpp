@@ -798,10 +798,13 @@ bool ManagedConfigApplyService::snapshot(const std::vector<String>& selected,
     output.clear();
     if (!initialized_) return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, "MCP adapter allocation failed");
     std::vector<SnapshotValue> values;
-    if (!readConsistentValues(adapters_, selected, values, error)) {
+    if (!readConsistentValues(adapters_, {}, values, error)) {
         return fail(output, error == "QUOTA_EXCEEDED" ? "QUOTA_EXCEEDED" :
                     error == "INVALID_ARGUMENT" ? "INVALID_ARGUMENT" : "DEVICE_CHANNEL_UNAVAILABLE",
                     error, error.c_str());
+    }
+    for (const auto& requested : selected) {
+        if (!adapter(requested)) return fail(output, "INVALID_ARGUMENT", error, "Unknown configuration section");
     }
     const String revision = revisionFromValues(values);
     if (revision.isEmpty()) return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, "CONFIG_READ_FAILED");
@@ -810,6 +813,8 @@ bool ManagedConfigApplyService::snapshot(const std::vector<String>& selected,
     JsonObject sections = output["sections"].to<JsonObject>();
     for (const auto& entry : values) {
         auto* adapterValue = entry.adapter;
+        if (!selected.empty() && std::find(selected.begin(), selected.end(),
+                                          String(adapterValue->section())) == selected.end()) continue;
         JsonObject row = sections[adapterValue->section()].to<JsonObject>();
         row["schemaVersion"] = adapterValue->schemaVersion();
         row["readOnly"] = adapterValue->readOnly();
@@ -1376,6 +1381,12 @@ bool ManagedConfigApplyService::recoverOperation(const String& operationId,
         step.state = "SUCCEEDED";
         step.error = "";
     }
+    for (size_t i = 0; i < record->stepCount; ++i) {
+        if (record->steps[i].state != "SUCCEEDED") {
+            proven = false;
+            break;
+        }
+    }
     if (proven) {
         if (record->rollback) {
             record->state = "ROLLED_BACK";
@@ -1385,18 +1396,19 @@ bool ManagedConfigApplyService::recoverOperation(const String& operationId,
                 parent->manualRecoveryRequired = false;
             }
         } else {
-            record->state = knownFailure ? "FAILED" : "SUCCEEDED";
-            record->error = knownFailure ? failureCode : "";
+            record->state = "SUCCEEDED";
+            record->error = "";
         }
         record->readbackRequired = false;
-        record->manualRecoveryRequired = knownFailure;
+        record->manualRecoveryRequired = false;
         unresolvedOperationId_.clear();
     } else {
-        record->state = "UNKNOWN";
-        record->error = "OUTCOME_UNKNOWN";
-        record->readbackRequired = true;
+        record->state = record->rollback ? "UNKNOWN" : knownFailure ? "FAILED" : "UNKNOWN";
+        record->error = knownFailure ? failureCode : "OUTCOME_UNKNOWN";
+        record->readbackRequired = record->state == "UNKNOWN";
+        record->manualRecoveryRequired = true;
         unresolvedOperationId_ = record->id;
-        error = "OUTCOME_UNKNOWN";
+        error = record->error;
     }
     serializeOperation(*record, output);
     return proven;
@@ -1496,15 +1508,21 @@ String ManagedConfigApplyService::rollback(JsonVariantConst request, JsonDocumen
     rollbackRecord.parentOperationId = id;
     rollbackRecord.state = "ROLLING_BACK";
     rollbackRecord.rollback = true;
+    rollbackRecord.stepCount = restore.size();
+    for (size_t i = 0; i < restore.size(); ++i) {
+        rollbackRecord.steps[i].section = restore[i].adapter->section();
+        rollbackRecord.steps[i].state = "PENDING";
+    }
     operations_.push_back(std::move(rollbackRecord));
     historyBytes_ += rollbackBytes;
     OperationRecord* rollback = &operations_.back();
     original = findOperation(id);
     String resultCode;
+    size_t rollbackIndex = 0;
     for (size_t i = original->stepCount; i-- > 0;) {
         StepRecord& prior = original->steps[i];
         if (!prior.persisted) continue;
-        StepRecord& step = rollback->steps[rollback->stepCount++];
+        StepRecord& step = rollback->steps[rollbackIndex++];
         step.section = prior.section;
         step.accepted = true;
         step.state = "APPLYING";

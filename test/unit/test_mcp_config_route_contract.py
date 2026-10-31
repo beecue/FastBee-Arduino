@@ -104,6 +104,14 @@ class McpConfigRouteContractTests(unittest.TestCase):
         self.assertIn("ConfigTransaction::mutex", migration)
         self.assertIn("validateProtocolConfigDocument", read(ROOT / "src/systems/ConfigStorage.cpp"))
 
+    def test_null_service_setup_is_guarded_and_requests_fail_503(self):
+        source = read(HANDLER_CPP)
+        setup = function_body(source, r"McpConfigRouteHandler::setupRoutes\s*\(")
+        self.assertIn("service_ && ctx_->protocolManager", setup)
+        admit = function_body(source, r"McpConfigRouteHandler::admit\s*\(")
+        self.assertIn("if (!service_)", admit)
+        self.assertIn("503", admit)
+
     def test_successful_apply_and_rollback_use_http_200(self):
         source = read(HANDLER_CPP)
         for handler in ("handleApply", "handleRollback"):

@@ -67,6 +67,14 @@ class FactoryResetPersistenceContractTests(unittest.TestCase):
         self.assertIn('filename + ".tmp"', body)
         self.assertIn("verifyJsonFile(filename)", body)
 
+    def test_factory_protocol_candidate_uses_shared_validation_before_write(self):
+        body = self.save_factory
+        self.assertIn("validateProtocolConfigDocument(parsed", body)
+        self.assertLess(
+            body.index("validateProtocolConfigDocument(parsed"),
+            body.index('filename + ".factory.tmp"'),
+        )
+
     def test_generation_delete_covers_main_backup_and_both_temp_files(self):
         body = self.delete_generations
         self.assertIn("findInCache(filename)", body)

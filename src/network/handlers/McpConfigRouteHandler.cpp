@@ -45,7 +45,7 @@ McpConfigRouteHandler::McpConfigRouteHandler(WebHandlerContext* ctx) : ctx_(ctx)
 
 void McpConfigRouteHandler::setupRoutes(AsyncWebServer* server) {
 #ifndef UNIT_TEST
-    if (ctx_->protocolManager) service_->setProtocolManager(ctx_->protocolManager);
+    if (service_ && ctx_->protocolManager) service_->setProtocolManager(ctx_->protocolManager);
 #endif
     server->on(AsyncURIMatcher::exact("/api/mcp/capabilities"), HTTP_GET,
                [this](AsyncWebServerRequest* request) { handleCapabilities(request); });
@@ -200,7 +200,7 @@ void McpConfigRouteHandler::handleApply(AsyncWebServerRequest* request) {
     auto input = FastBee::makeJsonDocument();
     if (!parseBody(request, input)) return;
 #ifndef UNIT_TEST
-    if (ctx_->protocolManager) service_->setProtocolManager(ctx_->protocolManager);
+    if (service_ && ctx_->protocolManager) service_->setProtocolManager(ctx_->protocolManager);
 #endif
     auto output = FastBee::makeJsonDocument();
     String error;
@@ -247,7 +247,7 @@ void McpConfigRouteHandler::handleRollback(AsyncWebServerRequest* request) {
     auto input = FastBee::makeJsonDocument();
     if (!parseBody(request, input)) return;
 #ifndef UNIT_TEST
-    if (ctx_->protocolManager) service_->setProtocolManager(ctx_->protocolManager);
+    if (service_ && ctx_->protocolManager) service_->setProtocolManager(ctx_->protocolManager);
 #endif
     auto output = FastBee::makeJsonDocument();
     String error;
@@ -279,7 +279,7 @@ void McpConfigRouteHandler::handleSecret(AsyncWebServerRequest* request) {
     const String idempotencyKey = input["idempotencyKey"].as<const char*>();
     String error;
 #ifndef UNIT_TEST
-    if (ctx_->protocolManager) service_->setProtocolManager(ctx_->protocolManager);
+    if (service_ && ctx_->protocolManager) service_->setProtocolManager(ctx_->protocolManager);
 #endif
     const bool stored = service_->storeSecret(secretRef, value, idempotencyKey, error);
     value = "";

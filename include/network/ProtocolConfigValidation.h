@@ -5,6 +5,7 @@
 #include <ArduinoJson.h>
 #include <cstring>
 #include "protocols/ModbusRegisterMapping.h"
+#include "protocols/MqttTopicPath.h"
 #include "systems/ConfigMigrationModbus.h"
 
 namespace FastBee {
@@ -25,6 +26,14 @@ inline bool protocolText(JsonVariantConst value, size_t maxBytes = 4096, bool al
            text.size() == std::strlen(text.c_str());
 }
 
+inline bool validOptionalMqttTopic(JsonVariantConst value, bool publish, bool allowEmpty) {
+    if (value.isNull()) return true;
+    const String topic = value.as<const char*>();
+    if (!protocolText(value, UINT16_MAX, allowEmpty)) return false;
+    if (allowEmpty && topic.isEmpty()) return true;
+    return validMqttTopicText(topic, publish);
+}
+
 inline bool protocolMqttTopics(JsonObjectConst mqtt, const char* key, String& error) {
     if (!mqtt.containsKey(key)) return true;
     const auto topics = mqtt[key].as<JsonArrayConst>();
@@ -32,7 +41,7 @@ inline bool protocolMqttTopics(JsonObjectConst mqtt, const char* key, String& er
     for (JsonVariantConst entry : topics) {
         if (!entry.is<JsonObjectConst>()) return protocolError(error, "MQTT_TOPICS_INVALID");
         const auto topic = entry.as<JsonObjectConst>();
-        if (!protocolText(topic["topic"], 512) ||
+        if (!validOptionalMqttTopic(topic["topic"], std::strcmp(key, "publishTopics") == 0, true) ||
             (topic.containsKey("qos") && (!topic["qos"].is<uint8_t>() || topic["qos"].as<uint8_t>() > 2)) ||
             (topic.containsKey("topicType") && (!topic["topicType"].is<uint8_t>() || topic["topicType"].as<uint8_t>() > 7)) ||
             !protocolBoolean(topic, "retain") || !protocolBoolean(topic, "enabled") ||
@@ -86,6 +95,20 @@ inline bool validateMqttCandidate(JsonVariantConst value, String& error) {
                             "ntpServer","willTopic","willPayload","iccid","summary","connectionTestId"}) {
         if (!protocolText(mqtt[key])) return protocolError(error, "MQTT_TYPE_INVALID");
     }
+    if (mqtt.containsKey("publishTopic") && !validOptionalMqttTopic(mqtt["publishTopic"], true, false))
+        return protocolError(error, "MQTT_PUBLISH_TOPIC_INVALID");
+    if (!validOptionalMqttTopic(mqtt["subscribeTopic"], false, true) ||
+        !validOptionalMqttTopic(mqtt["willTopic"], true, true) ||
+        !validOptionalMqttTopic(mqtt["topicPrefix"], true, true))
+        return protocolError(error, "MQTT_TOPIC_INVALID");
+    if (mqtt.containsKey("downgraded_original_scheme")) {
+        const char* scheme = mqtt["downgraded_original_scheme"].as<const char*>();
+        if (!scheme || (std::strcmp(scheme, "mqtt") && std::strcmp(scheme, "mqtts")))
+            return protocolError(error, "MQTT_SCHEME_INVALID");
+    }
+    if (mqtt.containsKey("downgraded_original_port") &&
+        (!mqtt["downgraded_original_port"].is<uint16_t>() || mqtt["downgraded_original_port"].as<uint16_t>() == 0))
+        return protocolError(error, "MQTT_PORT_INVALID");
     if ((mqtt["connectionTestOnly"] | false) && String(mqtt["connectionTestId"] | "").isEmpty())
         return protocolError(error, "MQTT_TEST_ID_REQUIRED");
     if (mqtt.containsKey("cardPlatformId") && !mqtt["cardPlatformId"].is<int32_t>())

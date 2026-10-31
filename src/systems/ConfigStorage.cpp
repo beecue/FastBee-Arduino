@@ -310,6 +310,13 @@ bool ConfigStorage::saveFactoryJSONConfig(const String& filename, const char* js
         LOG_ERRORF("ConfigStorage: Invalid factory JSON for %s", filename.c_str());
         return false;
     }
+    if (filename == FileSystem::PROTOCOL_CONFIG_FILE) {
+        String validationError;
+        if (!FastBee::validateProtocolConfigDocument(parsed, validationError)) {
+            LOG_ERRORF("ConfigStorage: Invalid factory protocol config: %s", validationError.c_str());
+            return false;
+        }
+    }
 
 #if FASTBEE_ENABLE_STORAGE_CACHE
     // Factory reset supersedes pending debounced writes.  Remove the entry
