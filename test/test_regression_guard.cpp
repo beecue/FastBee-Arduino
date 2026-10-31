@@ -4733,6 +4733,37 @@ void test_regression_mqtt_queued_report_publish_failure_retries() {
     TestLog::testEnd(true);
 }
 
+/**
+ * @brief MCP 受控连接测试（device.mqtt.test）只发起一次显式连接尝试
+ * 暂存候选必须 autoReconnect=false，启动器不含任何重连循环
+ */
+static void test_regression_mcp_mqtt_test_single_attempt_no_reconnect() {
+    TestLog::testStart("Regression: MCP MQTT test single attempt, no reconnect loop");
+    std::string handler = readRegressionSrcFile("src/network/handlers/MqttRouteHandler.cpp");
+    TEST_ASSERT_FALSE_MESSAGE(handler.empty(), "Cannot read MqttRouteHandler.cpp");
+
+    size_t stagePos = handler.find("stageMqttTestConfig(JsonVariantConst");
+    TEST_ASSERT_TRUE_MESSAGE(stagePos != std::string::npos, "stageMqttTestConfig not found");
+    std::string stageBlock = handler.substr(stagePos, 2200);
+    TEST_ASSERT_TRUE_MESSAGE(stageBlock.find("\"autoReconnect\", false") != std::string::npos,
+        "MCP test staging must set autoReconnect=false (single explicit attempt)");
+    TEST_ASSERT_TRUE_MESSAGE(stageBlock.find("\"autoReconnect\", true") == std::string::npos,
+        "MCP test staging must not enable autoReconnect");
+
+    size_t startPos = handler.find("MqttRouteHandler::startMcpConnectionTest(JsonVariantConst");
+    TEST_ASSERT_TRUE_MESSAGE(startPos != std::string::npos, "startMcpConnectionTest not found");
+    const size_t startEnd = handler.find("\n}", startPos);
+    TEST_ASSERT_TRUE_MESSAGE(startEnd != std::string::npos, "startMcpConnectionTest body must be complete");
+    std::string startBlock = handler.substr(startPos, startEnd - startPos);
+    TEST_ASSERT_TRUE_MESSAGE(startBlock.find("while") == std::string::npos
+        && startBlock.find("for (") == std::string::npos,
+        "MCP connection test starter must not contain reconnect loops");
+    TEST_ASSERT_TRUE_MESSAGE(startBlock.find("restartMQTTDeferred") != std::string::npos,
+        "MCP test must reuse the controlled deferred-restart lifecycle");
+    TestLog::step("MqttRouteHandler: MCP test is a single bounded attempt without reconnect loop");
+    TestLog::testEnd(true);
+}
+
 void test_regression_guard_group() {
     TestLog::groupStart("Regression Guard Tests");
 
@@ -4830,6 +4861,7 @@ void test_regression_guard_group() {
     RUN_TEST(test_regression_mqtt_disabled_waits_for_runtime_status);
     RUN_TEST(test_regression_mqtt_disabled_stops_backend_client);
     RUN_TEST(test_regression_mqtt_disabled_rejects_reconnect);
+    RUN_TEST(test_regression_mcp_mqtt_test_single_attempt_no_reconnect);
     RUN_TEST(test_regression_modbus_deferred_restart_before_heap_guard);
     RUN_TEST(test_regression_modbus_restart_distinguishes_intentional_idle);
     RUN_TEST(test_regression_factory_modbus_disabled_and_com15_explicit_topology);

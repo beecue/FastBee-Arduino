@@ -248,7 +248,8 @@ static bool stageMqttTestConfig(JsonVariantConst candidateMqtt, String& testId) 
     FastBee::setFixedJsonField(mqtt, "connectionTestOnly", true);
     FastBee::setFixedJsonField(mqtt, "connectionTestId", testId);
     FastBee::setFixedJsonField(mqtt, "enabled", true); // 仅本次显式临时探测，随后恢复
-    FastBee::setFixedJsonField(mqtt, "autoReconnect", true); // 探测必须尝试，即使常规自动重连关闭
+    // MCP 受控测试只发起一次显式连接尝试：不打开自动重连，恢复窗口有界兜底
+    FastBee::setFixedJsonField(mqtt, "autoReconnect", false);
     if (candidate.overflowed() ||
         !backupMqttConfig(doc["mqtt"].as<JsonVariantConst>(), candidate.as<JsonVariantConst>()))
         return false;
