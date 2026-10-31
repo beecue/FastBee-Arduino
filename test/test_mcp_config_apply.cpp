@@ -718,6 +718,16 @@ void test_partial_apply_recovery_allows_confirmed_rollback_of_persisted_steps() 
     TEST_ASSERT_FALSE(result["readbackRequired"]);
     TEST_ASSERT_TRUE(result["manualRecoveryRequired"]);
 
+    JsonDocument unrelated = applyBody(fixture,
+        "[{\"section\":\"peripherals\",\"schemaVersion\":1,\"patch\":{\"enabled\":true}}]",
+        "partial-recovery-unrelated-apply");
+    TEST_ASSERT_EQUAL_STRING("MANUAL_RECOVERY_REQUIRED", fixture.service.apply(unrelated, result, error).c_str());
+    TEST_ASSERT_EQUAL_STRING(operationId.c_str(), result["operationId"]);
+    TEST_ASSERT_EQUAL(0, fixture.peripherals.applyCalls);
+    TEST_ASSERT_FALSE(fixture.service.storeSecret("protocol.mqtt.password", "blocked", "partial-recovery-secret", error));
+    TEST_ASSERT_EQUAL_STRING("MANUAL_RECOVERY_REQUIRED", error.c_str());
+    TEST_ASSERT_EQUAL(0, fixture.protocol.secretCalls);
+
     JsonDocument rollback;
     rollback["operationId"] = operationId;
     rollback["idempotencyKey"] = "partial-recovery-rollback-confirm";
@@ -730,6 +740,14 @@ void test_partial_apply_recovery_allows_confirmed_rollback_of_persisted_steps() 
     JsonDocument original;
     TEST_ASSERT_TRUE(fixture.service.operation(operationId, original, error));
     TEST_ASSERT_EQUAL_STRING("ROLLED_BACK", original["state"]);
+
+    unrelated = applyBody(fixture,
+        "[{\"section\":\"peripherals\",\"schemaVersion\":1,\"patch\":{\"enabled\":true}}]",
+        "partial-recovery-unrelated-apply");
+    TEST_ASSERT_TRUE(fixture.service.apply(unrelated, result, error).isEmpty());
+    TEST_ASSERT_EQUAL(1, fixture.peripherals.applyCalls);
+    TEST_ASSERT_TRUE(fixture.service.storeSecret("protocol.mqtt.password", "allowed", "partial-recovery-secret", error));
+    TEST_ASSERT_EQUAL(1, fixture.protocol.secretCalls);
 }
 
 void test_partial_rollback_recovery_allows_rerollback_of_persisted_steps() {
@@ -757,6 +775,13 @@ void test_partial_rollback_recovery_allows_rerollback_of_persisted_steps() {
     TEST_ASSERT_FALSE(result["readbackRequired"]);
     TEST_ASSERT_TRUE(result["manualRecoveryRequired"]);
 
+    JsonDocument unrelated = applyBody(fixture,
+        "[{\"section\":\"ruleScripts\",\"schemaVersion\":1,\"patch\":{\"enabled\":true}}]",
+        "partial-rerollback-unrelated-apply");
+    TEST_ASSERT_EQUAL_STRING("MANUAL_RECOVERY_REQUIRED", fixture.service.apply(unrelated, result, error).c_str());
+    TEST_ASSERT_EQUAL_STRING(rollbackId.c_str(), result["operationId"]);
+    TEST_ASSERT_EQUAL(0, fixture.rules.applyCalls);
+
     JsonDocument second;
     second["operationId"] = rollbackId;
     second["idempotencyKey"] = "partial-rerollback-second";
@@ -769,6 +794,14 @@ void test_partial_rollback_recovery_allows_rerollback_of_persisted_steps() {
     JsonDocument original;
     TEST_ASSERT_TRUE(fixture.service.operation(originalId, original, error));
     TEST_ASSERT_EQUAL_STRING("SUCCEEDED", original["state"]);
+
+    JsonDocument recoveredSnapshot;
+    TEST_ASSERT_TRUE_MESSAGE(fixture.service.snapshot({}, recoveredSnapshot, error), error.c_str());
+    unrelated = applyBody(fixture,
+        "[{\"section\":\"ruleScripts\",\"schemaVersion\":1,\"patch\":{\"enabled\":true}}]",
+        "partial-rerollback-unrelated-apply");
+    TEST_ASSERT_TRUE_MESSAGE(fixture.service.apply(unrelated, result, error).isEmpty(), error.c_str());
+    TEST_ASSERT_EQUAL(1, fixture.rules.applyCalls);
 }
 
 void test_default_factory_protocol_is_valid() {

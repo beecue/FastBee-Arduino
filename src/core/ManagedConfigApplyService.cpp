@@ -791,6 +791,21 @@ bool ManagedConfigApplyService::checkUnknownGate(JsonDocument& output, String& e
     return true;
 }
 
+bool ManagedConfigApplyService::checkManualRecoveryGate(JsonDocument& output, String& error,
+                                                         const String& allowedOperationId) const {
+    if (manualRecoveryOperationId_.isEmpty() || manualRecoveryOperationId_ == allowedOperationId) {
+        return false;
+    }
+    output.clear();
+    output["success"] = false;
+    output["code"] = "MANUAL_RECOVERY_REQUIRED";
+    output["error"] = "MANUAL_RECOVERY_REQUIRED";
+    output["operationId"] = manualRecoveryOperationId_;
+    output["manualRecoveryRequired"] = true;
+    error = "MANUAL_RECOVERY_REQUIRED";
+    return true;
+}
+
 bool ManagedConfigApplyService::snapshot(const std::vector<String>& selected,
                                          JsonDocument& output, String& error) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -1185,7 +1200,7 @@ String ManagedConfigApplyService::apply(JsonVariantConst request, JsonDocument& 
         fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, "MCP adapter allocation failed");
         return output["code"].as<const char*>();
     }
-    if (checkUnknownGate(output, error)) {
+    if (checkUnknownGate(output, error) || checkManualRecoveryGate(output, error)) {
         clearCandidates(candidates);
         return error;
     }
@@ -1330,6 +1345,8 @@ String ManagedConfigApplyService::apply(JsonVariantConst request, JsonDocument& 
     } else if (stored->state == "UNKNOWN") {
         stored->error = "OUTCOME_UNKNOWN";
         unresolvedOperationId_ = stored->id;
+    } else if (stored->manualRecoveryRequired) {
+        manualRecoveryOperationId_ = stored->id;
     }
     serializeOperation(*stored, output);
     clearCandidates(candidates);
@@ -1403,6 +1420,7 @@ bool ManagedConfigApplyService::recoverOperation(const String& operationId,
         record->readbackRequired = false;
         record->manualRecoveryRequired = false;
         unresolvedOperationId_.clear();
+        if (manualRecoveryOperationId_ == record->id) manualRecoveryOperationId_.clear();
     } else if (proven) {
         record->state = "FAILED";
         record->error = failureCode.isEmpty()
@@ -1410,6 +1428,7 @@ bool ManagedConfigApplyService::recoverOperation(const String& operationId,
         record->readbackRequired = false;
         record->manualRecoveryRequired = true;
         unresolvedOperationId_.clear();
+        manualRecoveryOperationId_ = record->id;
         error = record->error;
     } else {
         record->state = "UNKNOWN";
@@ -1417,6 +1436,7 @@ bool ManagedConfigApplyService::recoverOperation(const String& operationId,
         record->readbackRequired = true;
         record->manualRecoveryRequired = true;
         unresolvedOperationId_ = record->id;
+        manualRecoveryOperationId_ = record->id;
         error = record->error;
     }
     serializeOperation(*record, output);
@@ -1449,7 +1469,7 @@ String ManagedConfigApplyService::rollback(JsonVariantConst request, JsonDocumen
         fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, "MCP adapter allocation failed");
         return output["code"].as<const char*>();
     }
-    if (checkUnknownGate(output, error)) return error;
+    if (checkUnknownGate(output, error) || checkManualRecoveryGate(output, error, id)) return error;
     OperationRecord* original = findOperation(id);
     if (!original) {
         fail(output, "OPERATION_NOT_FOUND", error, "Operation is unavailable in this boot");
@@ -1537,6 +1557,19 @@ String ManagedConfigApplyService::rollback(JsonVariantConst request, JsonDocumen
         step.state = "APPLYING";
         step.expected.set(prior.previous);
         ManagedConfigSectionAdapter* adapterValue = adapter(prior.section);
+#ifndef UNIT_TEST
+        step.previous = FastBee::makeJsonDocument();
+#endif
+        if (!readValue(*adapterValue, step.previous, error)) {
+            step.state = "UNKNOWN";
+            step.error = "READBACK_REQUIRED";
+            rollback->state = "UNKNOWN";
+            rollback->manualRecoveryRequired = true;
+            rollback->readbackRequired = true;
+            rollback->error = "OUTCOME_UNKNOWN";
+            resultCode = rollback->error;
+            break;
+        }
         ManagedAdapterApplyResult applied = adapterValue->apply(prior.previous, error);
         step.pendingRestart = prior.pendingRestart || applied.pendingRestart;
         rollback->pendingRestart = rollback->pendingRestart || step.pendingRestart;
@@ -1569,8 +1602,18 @@ String ManagedConfigApplyService::rollback(JsonVariantConst request, JsonDocumen
         rollback->state = "ROLLED_BACK";
         original->state = "ROLLED_BACK";
         original->manualRecoveryRequired = false;
+        if (manualRecoveryOperationId_ == original->id) {
+            manualRecoveryOperationId_.clear();
+            if (original->rollback) {
+                OperationRecord* parent = findOperation(original->parentOperationId);
+                if (parent && parent->manualRecoveryRequired) manualRecoveryOperationId_ = parent->id;
+            }
+        }
     } else if (rollback->state == "UNKNOWN") {
         unresolvedOperationId_ = rollback->id;
+        manualRecoveryOperationId_ = rollback->id;
+    } else if (rollback->manualRecoveryRequired) {
+        manualRecoveryOperationId_ = rollback->id;
     }
     serializeOperation(*rollback, output);
     error = resultCode;
@@ -1601,7 +1644,7 @@ bool ManagedConfigApplyService::storeSecret(const String& secretRef, const Strin
         error = "DEVICE_CHANNEL_UNAVAILABLE";
         return false;
     }
-    if (checkUnknownGate(gate, error)) return false;
+    if (checkUnknownGate(gate, error) || checkManualRecoveryGate(gate, error)) return false;
     const int separator = secretRef.indexOf('.');
     if (separator <= 0) {
         error = "INVALID_ARGUMENT";

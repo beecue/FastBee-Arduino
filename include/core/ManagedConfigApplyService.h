@@ -137,6 +137,7 @@ private:
     size_t historyBytes_ = 0;
     bool initialized_ = true;
     String unresolvedOperationId_;
+    String manualRecoveryOperationId_;
     struct DefaultAdapters;
     DefaultAdapters* defaults_ = nullptr;
 
@@ -155,6 +156,8 @@ private:
     bool combinedPreflight(std::vector<Candidate>& candidates, JsonDocument& output,
                            String& error);
     bool checkUnknownGate(JsonDocument& output, String& error) const;
+    bool checkManualRecoveryGate(JsonDocument& output, String& error,
+                                 const String& allowedOperationId = "") const;
     void orderCandidates(std::vector<Candidate>& candidates, bool reverse) const;
     bool checkRevision(const Candidate& candidate, String& error) const;
     OperationRecord* findIdempotency(const String& key);
