@@ -214,13 +214,48 @@
 
     // ---------- 配对 ----------
 
+    // 执行目录端点（固件生产只读路由；云端外设执行规则工具的 trigger/event schema 来源）
+    var EXEC_TRIGGER_TYPES_PATH = '/api/periph-exec/trigger-types';
+    var EXEC_EVENTS_PATH = '/api/periph-exec/events/static';
+
+    /**
+     * 读取设备执行目录（触发类型 + 静态事件）。两个子目录都必须是有效数组；
+     * 任一端点失败、形状不符或条数越界即视为目录整体不可用（返回 null，
+     * 云端规则工具失败关闭），绝不截断或编造部分目录。
+     */
+    function _fetchExecutionCatalog() {
+        return Promise.all([
+            _deviceGet(EXEC_TRIGGER_TYPES_PATH).catch(function () { return null; }),
+            _deviceGet(EXEC_EVENTS_PATH).catch(function () { return null; })
+        ]).then(function (results) {
+            var triggerTypes = results[0];
+            var events = results[1];
+            if (!Array.isArray(triggerTypes) || !triggerTypes.length
+                    || !Array.isArray(events) || !events.length) {
+                return null;
+            }
+            if (triggerTypes.length > 16 || events.length > 128) {
+                return null;
+            }
+            return { triggerTypes: triggerTypes, events: events };
+        });
+    }
+
     /**
      * 组合系统编译能力与外设类型目录（/api/peripherals/types，云端外设配置工具的 schema 来源）。
      * 目录读取失败时返回不含目录的能力并显式标记；组合 JSON 按 UTF-8 字节数（与云端存储口径一致，
      * 不用 UTF-16 长度）超过有界上限时放弃目录而不是截断伪造，云端外设工具在目录缺失时保持失败关闭。
+     * 执行目录（trigger/event，云端规则工具的 schema 来源）同样纳入组合；超限时先放弃执行目录、
+     * 再放弃外设目录，两级都显式标记。
      */
-    function _buildCapabilities(sysCaps, catalog) {
-        if (!sysCaps && !catalog) return null;
+    function _utf8Bytes(json) {
+        return (typeof TextEncoder === 'function')
+            ? new TextEncoder().encode(json).length
+            : unescape(encodeURIComponent(json)).length;
+    }
+
+    function _buildCapabilities(sysCaps, catalog, execution) {
+        if (!sysCaps && !catalog && !execution) return null;
         var combined = {};
         if (sysCaps && typeof sysCaps === 'object') {
             for (var key in sysCaps) {
@@ -232,19 +267,27 @@
         } else {
             combined.peripheralCatalogAvailable = false;
         }
+        if (execution && typeof execution === 'object') {
+            combined.executionCatalog = execution;
+        } else {
+            combined.executionCatalogAvailable = false;
+        }
         try {
-            var json = JSON.stringify(combined);
-            var bytes = (typeof TextEncoder === 'function')
-                ? new TextEncoder().encode(json).length
-                : unescape(encodeURIComponent(json)).length;
-            if (bytes > MAX_CAPABILITIES_BYTES) {
+            if (_utf8Bytes(JSON.stringify(combined)) > MAX_CAPABILITIES_BYTES && combined.executionCatalog) {
+                delete combined.executionCatalog;
+                combined.executionCatalogAvailable = false;
+                combined.executionCatalogOversize = true;
+            }
+            if (_utf8Bytes(JSON.stringify(combined)) > MAX_CAPABILITIES_BYTES) {
                 delete combined.peripheralCatalog;
                 combined.peripheralCatalogAvailable = false;
                 combined.peripheralCatalogOversize = true;
             }
         } catch (e) {
             delete combined.peripheralCatalog;
+            delete combined.executionCatalog;
             combined.peripheralCatalogAvailable = false;
+            combined.executionCatalogAvailable = false;
         }
         return combined;
     }
@@ -260,7 +303,10 @@
             _deviceGet('/api/system/info?brief=1').catch(function () { return null; }),
             // 外设类型目录（/api/peripherals/types，原始 body 含 profile/hardware）：
             // 云端外设配置工具的 schema 来源；读取失败时继续配对但不携带目录，云端失败关闭
-            _deviceGetRaw('/api/peripherals/types').catch(function () { return null; })
+            _deviceGetRaw('/api/peripherals/types').catch(function () { return null; }),
+            // 执行目录（trigger-types + events/static）：云端外设执行规则工具的 schema 来源；
+            // 读取失败时继续配对但不携带目录，云端规则工具失败关闭
+            _fetchExecutionCatalog()
         ]).then(function (results) {
             var info = results[0] || {};
             var sys = results[2] || {};
@@ -272,7 +318,7 @@
                 chipModel: chip.model || '',
                 firmwareVersion: (sys.device && sys.device.firmwareVersion) || '',
                 schemaVersion: SCHEMA_VERSION,
-                capabilities: _buildCapabilities(results[1], results[3])
+                capabilities: _buildCapabilities(results[1], results[3], results[4])
             };
             if (!device.deviceId || !device.macAddress) {
                 return { ok: false, error: 'DEVICE_API_FAILED' };
@@ -307,12 +353,14 @@
             return _deviceGet('/api/device/info');
         },
         'device.capabilities.read': function () {
-            // 能力刷新同样携带外设类型目录（原始 body，有界），供云端外设配置校验使用
+            // 能力刷新同样携带外设类型目录（原始 body，有界）与执行目录，
+            // 供云端外设配置与外设执行规则校验使用
             return Promise.all([
                 _deviceGet('/api/system/capabilities'),
-                _deviceGetRaw('/api/peripherals/types').catch(function () { return null; })
+                _deviceGetRaw('/api/peripherals/types').catch(function () { return null; }),
+                _fetchExecutionCatalog()
             ]).then(function (results) {
-                return _buildCapabilities(results[0], results[1]);
+                return _buildCapabilities(results[0], results[1], results[2]);
             });
         },
         'device.config.section.read': function (job) {

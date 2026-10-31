@@ -25,6 +25,24 @@ const DEVICE_INFO = {
 const SYSTEM_INFO = { success: true, data: { device: { firmwareVersion: '1.2.3' } } };
 const CAPABILITIES = { success: true, data: { mqtt: true, modbus: true } };
 const DEVICE_CONFIG = { success: true, data: { deviceName: 'connector-test', timezone: 'UTC+8' } };
+// 与固件 /api/periph-exec/trigger-types 和 /api/periph-exec/events/static 契约同形状的执行目录
+const TRIGGER_TYPES = {
+  success: true,
+  data: [
+    { type: 0, name: '平台触发', description: 'IoT平台通过MQTT下发指令时触发' },
+    { type: 1, name: '定时触发', description: '按指定时间间隔或每日时间点触发' },
+    { type: 4, name: '事件触发', description: 'WiFi/MQTT/按键/数据/外设执行等事件触发' },
+    { type: 5, name: '轮询触发', description: '本地数据源周期轮询条件评估触发' },
+  ],
+};
+const STATIC_EVENTS = {
+  success: true,
+  data: [
+    { id: 'wifi_connected', name: 'WiFi连接成功', category: 'WiFi', type: 1 },
+    { id: 'system_boot', name: '系统启动', category: '系统', type: 70 },
+  ],
+};
+
 // 与固件 /api/peripherals/types 契约同形状的外设类型目录
 const PERIPHERAL_TYPES = {
   success: true,
@@ -66,6 +84,14 @@ async function setup(page: any) {
       if (path === '/api/peripherals/types') {
         if ((window as any).typesFail) throw new Error('types endpoint down');
         return structuredClone((window as any).PERIPHERAL_TYPES);
+      }
+      if (path === '/api/periph-exec/trigger-types') {
+        if ((window as any).execCatalogFail) throw new Error('exec catalog down');
+        return structuredClone((window as any).TRIGGER_TYPES);
+      }
+      if (path === '/api/periph-exec/events/static') {
+        if ((window as any).execCatalogFail) throw new Error('exec catalog down');
+        return structuredClone((window as any).STATIC_EVENTS);
       }
       if (path === '/api/device/config') return structuredClone((window as any).DEVICE_CONFIG);
       throw new Error('unexpected device api: ' + path);
@@ -123,7 +149,9 @@ async function setup(page: any) {
     w.CAPABILITIES = fixtures.CAPABILITIES;
     w.DEVICE_CONFIG = fixtures.DEVICE_CONFIG;
     w.PERIPHERAL_TYPES = fixtures.PERIPHERAL_TYPES;
-  }, { DEVICE_INFO, SYSTEM_INFO, CAPABILITIES, DEVICE_CONFIG, PERIPHERAL_TYPES });
+    w.TRIGGER_TYPES = fixtures.TRIGGER_TYPES;
+    w.STATIC_EVENTS = fixtures.STATIC_EVENTS;
+  }, { DEVICE_INFO, SYSTEM_INFO, CAPABILITIES, DEVICE_CONFIG, PERIPHERAL_TYPES, TRIGGER_TYPES, STATIC_EVENTS });
 }
 
 async function pair(page: any) {
@@ -503,4 +531,76 @@ test('multibyte catalog oversize drops the catalog by UTF-8 bytes without pairin
   expect(capabilities.peripheralCatalog).toBeUndefined();
   expect(capabilities.peripheralCatalogAvailable).toBe(false);
   expect(capabilities.peripheralCatalogOversize).toBe(true);
+});
+
+test('pair sends the real execution catalog with device capabilities', async ({ page }) => {
+  await setup(page);
+  await pair(page);
+  const calls = await page.evaluate(() => (window as any).cloudCalls);
+  const pairCall = calls.find((c: any) => c.path === '/connector/v1/pair');
+  // 能力载荷必须携带真实 trigger/event 目录（云端外设执行规则工具的 schema 来源）
+  const exec = pairCall.body.device.capabilities.executionCatalog;
+  expect(exec.triggerTypes.map((t: any) => t.type)).toEqual([0, 1, 4, 5]);
+  expect(exec.events.map((e: any) => e.id)).toEqual(['wifi_connected', 'system_boot']);
+  const apiCalls = await page.evaluate(() => (window as any).apiCalls);
+  expect(apiCalls).toContain('/api/periph-exec/trigger-types');
+  expect(apiCalls).toContain('/api/periph-exec/events/static');
+});
+
+test('pair proceeds without execution catalog when its endpoints fail and marks it unavailable', async ({ page }) => {
+  await setup(page);
+  await page.evaluate(() => { (window as any).execCatalogFail = true; });
+  const result = await page.evaluate(async (cloud: string) => {
+    return await (window as any).FastBeeAiMcpConnector.pair(cloud, 'ABCD234567');
+  }, CLOUD);
+  // 执行目录读取失败不阻断配对；云端规则工具按目录缺失失败关闭
+  expect(result.ok).toBe(true);
+  const calls = await page.evaluate(() => (window as any).cloudCalls);
+  const pairCall = calls.find((c: any) => c.path === '/connector/v1/pair');
+  expect(pairCall.body.device.capabilities.executionCatalog).toBeUndefined();
+  expect(pairCall.body.device.capabilities.executionCatalogAvailable).toBe(false);
+  // 外设目录不受影响
+  expect(pairCall.body.device.capabilities.peripheralCatalog.data.gpio[0].value).toBe(12);
+});
+
+test('capabilities refresh job returns the execution catalog payload', async ({ page }) => {
+  await setup(page);
+  await pair(page);
+  await page.evaluate(() => (window as any).FastBeeAiMcpConnector.start());
+  await expect.poll(() => page.evaluate(() => (window as any).pendingPolls.length)).toBe(1);
+  await page.evaluate(() => {
+    (window as any).pendingPolls.shift()([
+      { jobId: 'job-cap-exec', type: 'device.capabilities.read', idempotencyKey: 'k-capx', deadlineAt: Date.now() + 60_000, leaseExpiresAt: Date.now() + 60_000 },
+    ]);
+  });
+  await expect.poll(() => page.evaluate(() =>
+    (window as any).cloudCalls.filter((c: any) => c.path.endsWith('/result')).length)).toBe(1);
+  const calls = await page.evaluate(() => (window as any).cloudCalls);
+  const result = calls.find((c: any) => c.path.endsWith('/result'));
+  expect(result.body.status).toBe('SUCCEEDED');
+  expect(result.body.result.executionCatalog.triggerTypes).toHaveLength(4);
+  expect(result.body.result.executionCatalog.events).toHaveLength(2);
+});
+
+test('oversize drops the execution catalog before the peripheral catalog', async ({ page }) => {
+  await setup(page);
+  // 执行目录超大而外设目录很小：超限必须先放弃执行目录，外设目录保留
+  await page.evaluate(() => {
+    const w = window as any;
+    const big = structuredClone(w.STATIC_EVENTS);
+    const pad = '事件名称填充汉字'.repeat(600); // 约 4800 UTF-8 字节/条
+    for (let i = 0; i < 4; i++) big.data.push({ id: 'pad_' + i, name: pad, category: '系统', type: 70 });
+    w.STATIC_EVENTS = big;
+  });
+  const result = await page.evaluate(async (cloud: string) => {
+    return await (window as any).FastBeeAiMcpConnector.pair(cloud, 'ABCD234567');
+  }, CLOUD);
+  expect(result.ok).toBe(true);
+  const calls = await page.evaluate(() => (window as any).cloudCalls);
+  const pairCall = calls.find((c: any) => c.path === '/connector/v1/pair');
+  const capabilities = pairCall.body.device.capabilities;
+  expect(capabilities.executionCatalog).toBeUndefined();
+  expect(capabilities.executionCatalogAvailable).toBe(false);
+  expect(capabilities.executionCatalogOversize).toBe(true);
+  expect(capabilities.peripheralCatalog.data.gpio[0].value).toBe(12);
 });

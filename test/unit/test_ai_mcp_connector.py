@@ -135,6 +135,17 @@ class AiMcpConnectorContractTests(unittest.TestCase):
         # 大小口径必须与云端存储一致：UTF-8 字节数，而非 UTF-16 长度
         self.assertIn("TextEncoder", SOURCE)
 
+    def test_pairing_and_capability_refresh_carry_execution_catalog(self):
+        # 配对与能力刷新都必须携带真实执行目录（云端规则工具的 trigger/event schema 来源）：
+        # 生产只读路由 /api/periph-exec/trigger-types 与 /api/periph-exec/events/static
+        self.assertIn("'/api/periph-exec/trigger-types'", SOURCE)
+        self.assertIn("'/api/periph-exec/events/static'", SOURCE)
+        self.assertIn("_fetchExecutionCatalog", SOURCE)
+        self.assertIn("executionCatalog", SOURCE)
+        # 目录缺失/越界显式标记，云端失败关闭；超限时先放弃执行目录
+        self.assertIn("executionCatalogAvailable", SOURCE)
+        self.assertIn("executionCatalogOversize", SOURCE)
+
 
 if __name__ == "__main__":
     unittest.main()
