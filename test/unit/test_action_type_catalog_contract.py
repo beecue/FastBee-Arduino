@@ -105,6 +105,8 @@ int main() {
     if (!FastBee::validateRuleActionValue(24, "", false)) return 18;
     if (!FastBee::validateRuleActionValue(34, "", true)) return 19;  // 禁止接收值替换
     // 与 ADMIN crossRuntimeModbusAndControlBoundariesMatchProduction 完全相同的边界输入
+    if (FastBee::validateRuleActionValue(16, "65535:on", false)) return 32;
+    if (!FastBee::validateRuleActionValue(16, "65536:on", false)) return 33;
     if (FastBee::validateRuleActionValue(17, "0", false)) return 20;
     if (FastBee::validateRuleActionValue(17, "65535", false)) return 21;
     if (FastBee::validateRuleActionValue(17, "65535:65535", false)) return 22;
