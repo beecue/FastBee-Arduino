@@ -193,6 +193,7 @@ test('malformed success data and structured UNKNOWN are UNKNOWN while definitive
       { success: false, data: { message: 'bad request' } },
       { success: false, code: 'OUTCOME_UNKNOWN' },
       { success: false, code: 'INVALID_ARGUMENT' },
+      { success: true, data: { operationId: 'op-success-unknown', state: 'FAILED', error: 'OUTCOME_UNKNOWN' } },
     ];
     (window as any).FastBeeAiMcpConnector.start();
   });
@@ -209,12 +210,14 @@ test('malformed success data and structured UNKNOWN are UNKNOWN while definitive
         draftId: 'draft-1', baseRevision: 'rev-a', approvalHash: 'approval', deviceIdempotencyKey: 'd-m4', operations: [] },
       { jobId: 'job-known-rejection', type: 'device.config.apply', idempotencyKey: 'k-m5', deadlineAt: Date.now() + 60_000,
         draftId: 'draft-1', baseRevision: 'rev-a', approvalHash: 'approval', deviceIdempotencyKey: 'd-m5', operations: [] },
+      { jobId: 'job-success-unknown', type: 'device.config.apply', idempotencyKey: 'k-m6', deadlineAt: Date.now() + 60_000,
+        draftId: 'draft-1', baseRevision: 'rev-a', approvalHash: 'approval', deviceIdempotencyKey: 'd-m6', operations: [] },
     ]);
   });
-  await expect.poll(() => page.evaluate(() => (window as any).cloudCalls.filter((c: any) => c.path.includes('job-')).length >= 5))
+  await expect.poll(() => page.evaluate(() => (window as any).cloudCalls.filter((c: any) => c.path.includes('job-')).length >= 6))
     .toBe(true);
   const calls = await page.evaluate(() => (window as any).cloudCalls);
-  for (const id of ['job-missing-op', 'job-bad-state', 'job-bad-error', 'job-structured-unknown']) {
+  for (const id of ['job-missing-op', 'job-bad-state', 'job-bad-error', 'job-structured-unknown', 'job-success-unknown']) {
     const result = calls.find((c: any) => c.path.includes(id));
     expect(result.body.status).toBe('UNKNOWN');
     expect(result.body.error).toBe('OUTCOME_UNKNOWN');

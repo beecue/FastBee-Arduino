@@ -85,6 +85,7 @@
         if (path === '/api/mcp/config/preflight') return typeof data.allowed === 'boolean';
         if (typeof data.operationId !== 'string' || !/^[A-Za-z0-9-]{1,128}$/.test(data.operationId)) return false;
         if (!_validOperationState(data.state)) return false;
+        if (data.state === 'FAILED' && !_definitiveDeviceRejection(data.error || data.code)) return false;
         if (data.steps !== undefined) {
             if (!Array.isArray(data.steps)) return false;
             for (var i = 0; i < data.steps.length; i++) {
