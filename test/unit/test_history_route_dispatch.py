@@ -159,6 +159,7 @@ public:
     void handleGetDynamicEvents(AsyncWebServerRequest*) { selected = "dynamic"; }
     void handleGetEventCategories(AsyncWebServerRequest*) { selected = "categories"; }
     void handleGetTriggerTypes(AsyncWebServerRequest*) { selected = "trigger-types"; }
+    void handleGetActionTypes(AsyncWebServerRequest*) { selected = "action-types"; }
     void handleGetRecentResults(AsyncWebServerRequest*) { selected = "results"; }
     void handlePreflightRuleJson(AsyncWebServerRequest*, JsonVariant&) { selected = "preflight-json"; }
     void handleUpdateRuleJson(AsyncWebServerRequest*, JsonVariant&) { selected = "update-json"; }

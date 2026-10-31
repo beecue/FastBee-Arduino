@@ -214,30 +214,92 @@
 
     // ---------- 配对 ----------
 
-    // 执行目录端点（固件生产只读路由；云端外设执行规则工具的 trigger/event schema 来源）
+    // 执行目录端点（固件生产只读路由；云端外设执行规则工具的 trigger/event/action schema 来源）
     var EXEC_TRIGGER_TYPES_PATH = '/api/periph-exec/trigger-types';
     var EXEC_EVENTS_PATH = '/api/periph-exec/events/static';
+    var EXEC_ACTION_TYPES_PATH = '/api/periph-exec/action-types';
+    var EXEC_CATALOG_SCHEMA_VERSION = 1;
+
+    function _isNonBlankString(value, maxLen) {
+        return typeof value === 'string' && value.length > 0 && value.length <= maxLen;
+    }
+
+    function _isUint8(value) {
+        return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 255;
+    }
+
+    // 严格目录行校验：必填字段类型化且非空、ID/类型值唯一；任何畸形/重复行使整个目录不可用，
+    // 不挑选部分行伪造可用目录（云端按缺失失败关闭）
+    function _validTriggerTypes(list) {
+        if (!Array.isArray(list) || !list.length || list.length > 16) return false;
+        var seen = {};
+        for (var i = 0; i < list.length; i++) {
+            var row = list[i];
+            if (!row || !_isUint8(row.type) || !_isNonBlankString(row.name, 64)) return false;
+            if (seen[row.type]) return false;
+            seen[row.type] = true;
+        }
+        return true;
+    }
+
+    function _validEvents(list) {
+        if (!Array.isArray(list) || !list.length || list.length > 128) return false;
+        var seen = {};
+        for (var i = 0; i < list.length; i++) {
+            var row = list[i];
+            if (!row || !_isNonBlankString(row.id, 64) || !_isNonBlankString(row.name, 128)
+                    || !_isUint8(row.type)) return false;
+            if (seen[row.id]) return false;
+            seen[row.id] = true;
+        }
+        return true;
+    }
+
+    function _validActionTypes(payload) {
+        if (!payload || payload.schemaVersion !== EXEC_CATALOG_SCHEMA_VERSION
+                || !_isNonBlankString(payload.firmwareVersion, 64)) return false;
+        var list = payload.actions;
+        if (!Array.isArray(list) || !list.length || list.length > 64) return false;
+        var seen = {};
+        for (var i = 0; i < list.length; i++) {
+            var row = list[i];
+            if (!row || !_isUint8(row.value) || !_isNonBlankString(row.name, 64)
+                    || typeof row.requiresPeripheralTarget !== 'boolean') return false;
+            if (row.targetTypes !== undefined && row.targetTypes !== null) {
+                if (!Array.isArray(row.targetTypes)) return false;
+                for (var j = 0; j < row.targetTypes.length; j++) {
+                    if (!_isUint8(row.targetTypes[j])) return false;
+                }
+            }
+            if (seen[row.value]) return false;
+            seen[row.value] = true;
+        }
+        return true;
+    }
 
     /**
-     * 读取设备执行目录（触发类型 + 静态事件）。两个子目录都必须是有效数组；
-     * 任一端点失败、形状不符或条数越界即视为目录整体不可用（返回 null，
-     * 云端规则工具失败关闭），绝不截断或编造部分目录。
+     * 读取设备执行目录（触发类型 + 静态事件 + 生产动作类型目录）。
+     * 三个子目录都必须通过严格形状校验（类型化必填字段、唯一 ID）；任一端点失败、
+     * 畸形或超界即视为目录整体不可用（返回 null，云端规则工具失败关闭），
+     * 绝不截断或编造部分目录。
      */
     function _fetchExecutionCatalog() {
         return Promise.all([
             _deviceGet(EXEC_TRIGGER_TYPES_PATH).catch(function () { return null; }),
-            _deviceGet(EXEC_EVENTS_PATH).catch(function () { return null; })
+            _deviceGet(EXEC_EVENTS_PATH).catch(function () { return null; }),
+            _deviceGet(EXEC_ACTION_TYPES_PATH).catch(function () { return null; })
         ]).then(function (results) {
-            var triggerTypes = results[0];
-            var events = results[1];
-            if (!Array.isArray(triggerTypes) || !triggerTypes.length
-                    || !Array.isArray(events) || !events.length) {
+            if (!_validTriggerTypes(results[0]) || !_validEvents(results[1])
+                    || !_validActionTypes(results[2])) {
                 return null;
             }
-            if (triggerTypes.length > 16 || events.length > 128) {
-                return null;
-            }
-            return { triggerTypes: triggerTypes, events: events };
+            return {
+                schemaVersion: EXEC_CATALOG_SCHEMA_VERSION,
+                firmwareVersion: results[2].firmwareVersion,
+                triggerTypes: results[0],
+                events: results[1],
+                actions: results[2].actions
+            };
         });
     }
 
@@ -354,13 +416,21 @@
         },
         'device.capabilities.read': function () {
             // 能力刷新同样携带外设类型目录（原始 body，有界）与执行目录，
-            // 供云端外设配置与外设执行规则校验使用
+            // 供云端外设配置与外设执行规则校验使用；顶层附带当前固件版本，
+            // 云端据此把刷新结果写回注册并做目录新鲜度绑定
             return Promise.all([
                 _deviceGet('/api/system/capabilities'),
                 _deviceGetRaw('/api/peripherals/types').catch(function () { return null; }),
-                _fetchExecutionCatalog()
+                _fetchExecutionCatalog(),
+                _deviceGet('/api/system/info?brief=1').catch(function () { return null; })
             ]).then(function (results) {
-                return _buildCapabilities(results[0], results[1], results[2]);
+                var combined = _buildCapabilities(results[0], results[1], results[2]);
+                if (combined && typeof combined === 'object'
+                        && !Object.prototype.hasOwnProperty.call(combined, 'firmwareVersion')) {
+                    var fw = results[3] && results[3].device && results[3].device.firmwareVersion;
+                    if (typeof fw === 'string' && fw) combined.firmwareVersion = fw;
+                }
+                return combined;
             });
         },
         'device.config.section.read': function (job) {

@@ -40,6 +40,7 @@ private:
     void handleGetDynamicEvents(AsyncWebServerRequest* request);
     void handleGetEventCategories(AsyncWebServerRequest* request);
     void handleGetTriggerTypes(AsyncWebServerRequest* request);
+    void handleGetActionTypes(AsyncWebServerRequest* request);
     void handleGetControls(AsyncWebServerRequest* request);
     void handleGetRecentResults(AsyncWebServerRequest* request);
 

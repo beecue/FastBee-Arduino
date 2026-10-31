@@ -20,6 +20,7 @@
 #include "core/SensorConfigEpoch.h"
 #include "core/ActionValueContract.h"
 #include "core/PeriphExecExecutor.h"  // guessSensorDataField（数据源字段推断与执行器同规则）
+#include "core/ActionTypeCatalog.h"   // 生产动作类型目录（MCP 能力载荷来源）
 #include "core/PeripheralManager.h"
 #include "core/ChipConfig.h"
 #include "core/ResourceProfile.h"
@@ -683,6 +684,10 @@ void PeriphExecRouteHandler::setupRoutes(AsyncWebServer* server) {
     
     server->on(AsyncURIMatcher::exact("/api/periph-exec/trigger-types"), HTTP_GET,
               [this](AsyncWebServerRequest* request) { handleGetTriggerTypes(request); });
+
+    // 生产动作类型目录（MCP 配对能力载荷来源；只读、编译期内容）
+    server->on(AsyncURIMatcher::exact("/api/periph-exec/action-types"), HTTP_GET,
+              [this](AsyncWebServerRequest* request) { handleGetActionTypes(request); });
 
     server->on(AsyncURIMatcher::exact("/api/periph-exec/results"), HTTP_GET,
               [this](AsyncWebServerRequest* request) { handleGetRecentResults(request); });
@@ -1745,6 +1750,26 @@ void PeriphExecRouteHandler::handleGetTriggerTypes(AsyncWebServerRequest* reques
 
     String triggerTypesJson = PeriphExecManager::getValidTriggerTypes();
     HandlerUtils::sendJsonSuccess(request, triggerTypesJson);
+}
+
+// ========== 获取生产动作类型目录 ==========
+
+void PeriphExecRouteHandler::handleGetActionTypes(AsyncWebServerRequest* request) {
+    if (!ctx->requireAuth(request)) return;
+
+    // 内容只依赖编译期谓词与固件版本：首次构建后缓存，后续直接返回
+    static String cached;
+    if (cached.isEmpty()) {
+        JsonDocument doc;
+        FastBee::ActionTypeCatalog::writeActionTypeCatalog(doc.to<JsonObject>());
+        if (doc.overflowed() || !cached.reserve(measureJson(doc) + 1) ||
+            serializeJson(doc, cached) == 0) {
+            cached = String();
+            HandlerUtils::sendJsonError(request, 503, "Action type catalog unavailable", 5);
+            return;
+        }
+    }
+    HandlerUtils::sendJsonSuccess(request, cached);
 }
 
 // ========== JSON → PeriphExecRule 解析辅助 ==========

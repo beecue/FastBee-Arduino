@@ -232,6 +232,11 @@
       "path": "/api/periph-exec/trigger-types"
     },
     {
+      "name": "periph-exec-action-types",
+      "method": "GET",
+      "path": "/api/periph-exec/action-types"
+    },
+    {
       "name": "periph-exec-static-events",
       "method": "GET",
       "path": "/api/periph-exec/events/static"
