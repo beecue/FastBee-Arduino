@@ -216,7 +216,50 @@ void test_actual_http_chunked_clean_eof_completes() {
     TEST_ASSERT_EQUAL_STRING(payload.c_str(), response.c_str());
 }
 
-void test_cancellation_after_post_and_final_read_is_terminal() {
+class CancellingPostHttpClient : public AiProviderHttpClient {
+public:
+    explicit CancellingPostHttpClient(std::atomic<bool>& cancelled)
+        : cancelled_(cancelled), stream_("not-json") {}
+    int post(const String&) override {
+        cancelled_.store(true);
+        return 200;
+    }
+    int responseSize() override {
+        ++responseSizeCalls;
+        return -1;
+    }
+    AiProviderStream* responseStream() override {
+        ++responseStreamCalls;
+        return &stream_;
+    }
+    String responseHeader(const char*) override { return ""; }
+    void end() override { ++endCalls; }
+
+    int responseSizeCalls = 0;
+    int responseStreamCalls = 0;
+    int endCalls = 0;
+private:
+    std::atomic<bool>& cancelled_;
+    BufferedStream stream_;
+};
+
+void test_cancellation_after_post_skips_response() {
+    std::atomic<bool> cancelled{false};
+    CancellingPostHttpClient http(cancelled);
+    AiProviderRequest request;
+    request.deadlineAtMs = millis() + 1000;
+    request.cancelRequested = &cancelled;
+    AiProviderReply reply;
+    reply.text = "untouched";
+    const AiProviderResult result = AiProviderClient::completePost(http, "{}", request, reply, request.deadlineAtMs);
+    TEST_ASSERT_EQUAL(static_cast<int>(AiProviderError::TIMEOUT), static_cast<int>(result.error));
+    TEST_ASSERT_EQUAL_STRING("untouched", reply.text.c_str());
+    TEST_ASSERT_EQUAL(0, http.responseSizeCalls);
+    TEST_ASSERT_EQUAL(0, http.responseStreamCalls);
+    TEST_ASSERT_EQUAL(1, http.endCalls);
+}
+
+void test_cancellation_after_final_read_is_terminal() {
     std::atomic<bool> cancelled{false};
     const std::string payload = "{}";
     BufferedStream identity(payload, &cancelled);
@@ -228,6 +271,46 @@ void test_cancellation_after_post_and_final_read_is_terminal() {
     response = "";
     TEST_ASSERT_EQUAL(static_cast<int>(AiHttpReadStatus::TIMEOUT),
         static_cast<int>(AiProviderClient::readResponse(chunked, -1, millis() + 1000, &cancelled, response, true)));
+}
+
+void test_chunk_sizes_require_ascii_hex() {
+    const char* malformed[] = {
+        "+4\r\nabcd\r\n0\r\n\r\n",
+        "-1\r\nx\r\n0\r\n\r\n",
+        " 4\r\nabcd\r\n0\r\n\r\n"
+    };
+    for (const char* raw : malformed) {
+        BufferedStream stream(raw);
+        String response;
+        TEST_ASSERT_EQUAL(static_cast<int>(AiHttpReadStatus::IO_ERROR),
+            static_cast<int>(AiProviderClient::readResponse(stream, -1, millis() + 1000, nullptr, response, true)));
+        TEST_ASSERT_TRUE(response.isEmpty());
+    }
+}
+
+void test_chunk_trailers_are_bounded_and_validated() {
+    BufferedStream valid("2\r\n{}\r\n0\r\nX-Checksum: abc123\r\n\r\n");
+    String response;
+    TEST_ASSERT_EQUAL(static_cast<int>(AiHttpReadStatus::COMPLETE),
+        static_cast<int>(AiProviderClient::readResponse(valid, -1, millis() + 1000, nullptr, response, true)));
+    TEST_ASSERT_EQUAL_STRING("{}", response.c_str());
+
+    const std::string oversizedLine = "0\r\nX: " + std::string(1100, 'a') + "\r\n\r\n";
+    std::string oversizedTotal = "0\r\n";
+    for (int i = 0; i < 700; ++i) oversizedTotal += "X: a\r\n";
+    oversizedTotal += "\r\n";
+    const std::string malformed[] = {
+        "0\r\nX-Checksum value\r\n\r\n",
+        "0\r\nX-Checksum: value\n\n",
+        oversizedLine,
+        oversizedTotal
+    };
+    for (const std::string& raw : malformed) {
+        BufferedStream stream(raw);
+        response = "";
+        TEST_ASSERT_EQUAL(static_cast<int>(AiHttpReadStatus::IO_ERROR),
+            static_cast<int>(AiProviderClient::readResponse(stream, -1, millis() + 1000, nullptr, response, true)));
+    }
 }
 
 void test_malformed_and_truncated_chunks_are_rejected() {
@@ -256,6 +339,9 @@ void test_ai_provider_group() {
     RUN_TEST(test_available_data_also_honors_deadline);
     RUN_TEST(test_actual_http_unknown_length_clean_eof_completes);
     RUN_TEST(test_actual_http_chunked_clean_eof_completes);
-    RUN_TEST(test_cancellation_after_post_and_final_read_is_terminal);
+    RUN_TEST(test_cancellation_after_post_skips_response);
+    RUN_TEST(test_cancellation_after_final_read_is_terminal);
+    RUN_TEST(test_chunk_sizes_require_ascii_hex);
+    RUN_TEST(test_chunk_trailers_are_bounded_and_validated);
     RUN_TEST(test_malformed_and_truncated_chunks_are_rejected);
 }

@@ -58,9 +58,22 @@ public:
     virtual AiProviderResult complete(const AiProviderRequest& request, AiProviderReply& reply) = 0;
 };
 
+class AiProviderHttpClient {
+public:
+    virtual ~AiProviderHttpClient() = default;
+    virtual int post(const String& body) = 0;
+    virtual int responseSize() = 0;
+    virtual AiProviderStream* responseStream() = 0;
+    virtual String responseHeader(const char* name) = 0;
+    virtual void end() = 0;
+};
+
 class AiProviderClient : public AiProviderTransport {
 public:
     AiProviderResult complete(const AiProviderRequest& request, AiProviderReply& reply) override;
+    static AiProviderResult completePost(AiProviderHttpClient& http, const String& body,
+                                         const AiProviderRequest& request, AiProviderReply& reply,
+                                         uint32_t deadlineAtMs);
     static bool buildRequest(const AiProviderRequest& request, JsonDocument& output, String& error);
     static bool parseResponse(const String& body, const std::vector<String>& allowedTools,
                               AiProviderReply& reply, String& error);

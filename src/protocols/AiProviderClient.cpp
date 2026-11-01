@@ -2,9 +2,8 @@
 #if FASTBEE_ENABLE_AI || defined(UNIT_TEST)
 #include "protocols/AiProviderClient.h"
 
-#include <cerrno>
-#include <cstdlib>
 #include <cstring>
+#include <limits>
 
 #ifndef UNIT_TEST
 #include <HTTPClient.h>
@@ -15,7 +14,7 @@ extern const uint8_t x509_crt_bundle_end[] asm("_binary_x509_crt_bundle_end");
 
 class NetworkClientStream : public AiProviderStream {
 public:
-    explicit NetworkClientStream(NetworkClient* client) : client_(client) {}
+    explicit NetworkClientStream(NetworkClient* client = nullptr) : client_(client) {}
     int available() override { return client_ ? client_->available() : 0; }
     size_t readBytes(uint8_t* data, size_t length) override {
         return client_ ? client_->readBytes(data, length) : 0;
@@ -23,6 +22,23 @@ public:
     bool connected() override { return client_ && client_->connected(); }
 private:
     NetworkClient* client_;
+};
+
+class NetworkHttpClient : public AiProviderHttpClient {
+public:
+    explicit NetworkHttpClient(HTTPClient& http) : http_(http) {}
+    int post(const String& body) override {
+        const int status = http_.POST(reinterpret_cast<uint8_t*>(const_cast<char*>(body.c_str())), body.length());
+        stream_ = NetworkClientStream(http_.getStreamPtr());
+        return status;
+    }
+    int responseSize() override { return http_.getSize(); }
+    AiProviderStream* responseStream() override { return &stream_; }
+    String responseHeader(const char* name) override { return http_.header(name); }
+    void end() override { http_.end(); }
+private:
+    HTTPClient& http_;
+    NetworkClientStream stream_;
 };
 #endif
 
@@ -80,6 +96,9 @@ AiHttpReadStatus AiProviderClient::readResponse(AiProviderStream& stream, int co
     ChunkState chunkState = ChunkState::SIZE;
     String chunkLine;
     size_t chunkRemaining = 0;
+    size_t trailerBytes = 0;
+    constexpr size_t maxTrailerLineBytes = 1024;
+    constexpr size_t maxTrailerBytes = 4096;
     bool carriage = false;
     auto consume = [&](uint8_t value) -> bool {
         switch (chunkState) {
@@ -95,11 +114,18 @@ AiHttpReadStatus AiProviderClient::readResponse(AiProviderStream& stream, int co
                     const int extension = chunkLine.indexOf(';');
                     const String sizeText = extension >= 0 ? chunkLine.substring(0, extension) : chunkLine;
                     if (sizeText.isEmpty()) return false;
-                    errno = 0;
-                    char* end = nullptr;
-                    const unsigned long parsed = strtoul(sizeText.c_str(), &end, 16);
-                    if (errno == ERANGE || end != sizeText.c_str() + sizeText.length()) return false;
-                    chunkRemaining = static_cast<size_t>(parsed);
+                    size_t parsed = 0;
+                    for (size_t i = 0; i < sizeText.length(); ++i) {
+                        const char digitText = sizeText[i];
+                        unsigned digit;
+                        if (digitText >= '0' && digitText <= '9') digit = digitText - '0';
+                        else if (digitText >= 'a' && digitText <= 'f') digit = digitText - 'a' + 10;
+                        else if (digitText >= 'A' && digitText <= 'F') digit = digitText - 'A' + 10;
+                        else return false;
+                        if (parsed > (std::numeric_limits<size_t>::max() - digit) / 16) return false;
+                        parsed = parsed * 16 + digit;
+                    }
+                    chunkRemaining = parsed;
                     chunkLine = "";
                     chunkState = chunkRemaining == 0 ? ChunkState::TRAILER : ChunkState::DATA;
                     return true;
@@ -126,6 +152,7 @@ AiHttpReadStatus AiProviderClient::readResponse(AiProviderStream& stream, int co
                 }
                 return false;
             case ChunkState::TRAILER:
+                if (++trailerBytes > maxTrailerBytes) return false;
                 if (value == '\r') {
                     if (carriage) return false;
                     carriage = true;
@@ -134,10 +161,28 @@ AiHttpReadStatus AiProviderClient::readResponse(AiProviderStream& stream, int co
                 if (value == '\n') {
                     if (!carriage) return false;
                     carriage = false;
-                    chunkState = ChunkState::DONE;
+                    if (chunkLine.isEmpty()) {
+                        chunkState = ChunkState::DONE;
+                        return true;
+                    }
+                    const int colon = chunkLine.indexOf(':');
+                    if (colon <= 0) return false;
+                    for (int i = 0; i < colon; ++i) {
+                        const char c = chunkLine[i];
+                        const bool token = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                            (c >= 'A' && c <= 'Z') || std::strchr("!#$%&'*+-.^_`|~", c);
+                        if (!token) return false;
+                    }
+                    for (size_t i = colon + 1; i < chunkLine.length(); ++i) {
+                        const uint8_t c = static_cast<uint8_t>(chunkLine[i]);
+                        if ((c < 0x20 && c != '\t') || c == 0x7f) return false;
+                    }
+                    chunkLine = "";
                     return true;
                 }
-                return false;
+                if (carriage || chunkLine.length() >= maxTrailerLineBytes) return false;
+                chunkLine.concat(static_cast<char>(value));
+                return true;
             default:
                 return true;
         }
@@ -343,6 +388,54 @@ bool AiProviderClient::parseResponse(const String& body, const std::vector<Strin
     return true;
 }
 
+AiProviderResult AiProviderClient::completePost(AiProviderHttpClient& http, const String& body,
+        const AiProviderRequest& request, AiProviderReply& reply, uint32_t deadlineAtMs) {
+    auto remaining = [&]() -> uint32_t {
+        if (!terminalAllowed(deadlineAtMs, request.cancelRequested)) return 0;
+        const int32_t left = static_cast<int32_t>(deadlineAtMs - millis());
+        return left > 0 ? static_cast<uint32_t>(left) : 0;
+    };
+    const int status = http.post(body);
+    AiProviderResult result;
+    if (!remaining()) {
+        result = AiProviderResult::failure(AiProviderError::TIMEOUT);
+    } else if (status == 401 || status == 403) {
+        result = AiProviderResult::failure(AiProviderError::UNAUTHORIZED);
+    } else if (status == 429) {
+        result = AiProviderResult::failure(AiProviderError::RATE_LIMITED);
+    } else if (status < 200 || status >= 300) {
+        result = AiProviderResult::failure(status < 0 ? AiProviderError::TIMEOUT : AiProviderError::TRANSPORT);
+    } else {
+        const int length = http.responseSize();
+        if (length > static_cast<int>(kMaxResponseBytes)) {
+            result = AiProviderResult::failure(AiProviderError::RESPONSE_TOO_LARGE);
+        } else {
+            String response;
+            response.reserve(length > 0 ? length : 4096);
+            AiProviderStream* stream = http.responseStream();
+            const AiHttpReadStatus readStatus = readResponse(*stream, length, deadlineAtMs,
+                request.cancelRequested, response, http.responseHeader("Transfer-Encoding").equalsIgnoreCase("chunked"));
+            if (readStatus == AiHttpReadStatus::TIMEOUT || readStatus == AiHttpReadStatus::IO_ERROR) {
+                result = AiProviderResult::failure(AiProviderError::TIMEOUT);
+            } else if (readStatus == AiHttpReadStatus::TOO_LARGE) {
+                result = AiProviderResult::failure(AiProviderError::RESPONSE_TOO_LARGE);
+            } else {
+                String error;
+                if (!parseResponse(response, request.allowedTools.empty()
+                        ? std::vector<String>{"create_gpio_output", "create_dht_sensor"}
+                        : request.allowedTools, reply, error)) {
+                    result = AiProviderResult::failure(error == "AI_RESPONSE_TOO_LARGE"
+                        ? AiProviderError::RESPONSE_TOO_LARGE
+                        : error == "AI_UNSUPPORTED_TOOL" ? AiProviderError::UNSUPPORTED_TOOL
+                        : AiProviderError::INVALID_RESPONSE);
+                }
+            }
+        }
+    }
+    http.end();
+    return result;
+}
+
 AiProviderResult AiProviderClient::complete(const AiProviderRequest& request, AiProviderReply& reply) {
 #ifdef UNIT_TEST
     (void)request;
@@ -385,42 +478,8 @@ AiProviderResult AiProviderClient::complete(const AiProviderRequest& request, Ai
         http.end();
         return AiProviderResult::failure(AiProviderError::TIMEOUT);
     }
-    const int status = http.POST(reinterpret_cast<uint8_t*>(const_cast<char*>(serialized.c_str())), serialized.length());
-    AiProviderResult result;
-    if (!remaining()) {
-        result = AiProviderResult::failure(AiProviderError::TIMEOUT);
-    } else if (status == HTTP_CODE_UNAUTHORIZED || status == HTTP_CODE_FORBIDDEN) {
-        result = AiProviderResult::failure(AiProviderError::UNAUTHORIZED);
-    } else if (status == 429) {
-        result = AiProviderResult::failure(AiProviderError::RATE_LIMITED);
-    } else if (status < 200 || status >= 300) {
-        result = AiProviderResult::failure(status < 0 ? AiProviderError::TIMEOUT : AiProviderError::TRANSPORT);
-    } else {
-        const int length = http.getSize();
-        if (length > static_cast<int>(kMaxResponseBytes)) {
-            result = AiProviderResult::failure(AiProviderError::RESPONSE_TOO_LARGE);
-        } else {
-            String response;
-            response.reserve(length > 0 ? length : 4096);
-            NetworkClientStream stream(http.getStreamPtr());
-            const AiHttpReadStatus readStatus = readResponse(stream, length, deadlineAtMs,
-                request.cancelRequested, response, http.header("Transfer-Encoding").equalsIgnoreCase("chunked"));
-            if (readStatus == AiHttpReadStatus::TIMEOUT || readStatus == AiHttpReadStatus::IO_ERROR) {
-                result = AiProviderResult::failure(AiProviderError::TIMEOUT);
-            } else if (readStatus == AiHttpReadStatus::TOO_LARGE) {
-                result = AiProviderResult::failure(AiProviderError::RESPONSE_TOO_LARGE);
-            } else if (!parseResponse(response, request.allowedTools.empty()
-                    ? std::vector<String>{"create_gpio_output", "create_dht_sensor"}
-                    : request.allowedTools, reply, error)) {
-                result = AiProviderResult::failure(error == "AI_RESPONSE_TOO_LARGE"
-                    ? AiProviderError::RESPONSE_TOO_LARGE
-                    : error == "AI_UNSUPPORTED_TOOL" ? AiProviderError::UNSUPPORTED_TOOL
-                    : AiProviderError::INVALID_RESPONSE);
-            }
-        }
-    }
-    http.end();
-    return result;
+    NetworkHttpClient exchange(http);
+    return completePost(exchange, serialized, request, reply, deadlineAtMs);
 #endif
 }
 #endif
