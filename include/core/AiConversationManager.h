@@ -44,6 +44,7 @@ public:
     AiConversationManager(AiProviderTransport& transport, AiProposalService& proposals);
     ~AiConversationManager();
     bool start(String& error);
+    void requestStop();
     void stop();
     bool isRunning() const { return running_; }
     bool isWorkerActive() const { return workerActive_.load(); }
@@ -68,7 +69,7 @@ private:
         String message;
         String documentContext;
         uint32_t startedAtMs = 0;
-        bool cancelRequested = false;
+        std::atomic<bool> cancelRequested{false};
         bool mcpEnabled = false;
         bool toolResultReady = false;
         String toolResult;

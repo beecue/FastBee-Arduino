@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <atomic>
 #include <utility>
 #include <vector>
 
@@ -31,6 +32,8 @@ struct AiProviderRequest {
     String toolArgumentsJson;
     String toolResult;
     std::vector<String> allowedTools;
+    uint32_t deadlineAtMs = 0;
+    const std::atomic<bool>* cancelRequested = nullptr;
 };
 
 struct AiProviderReply {
@@ -62,6 +65,8 @@ public:
                               AiProviderReply& reply, String& error);
     static String completionUrl(const AiConfig& config);
     static String safeError(AiProviderError error);
+    static bool pumpWait(int available, size_t total, int length, uint32_t deadlineAtMs,
+                         const std::atomic<bool>* cancelRequested);
 };
 
 #endif

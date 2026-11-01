@@ -126,7 +126,7 @@ test('AI-MCP apply requires human confirmation and elicitation; expired/replayed
     catch (error: any) { replayed = error.message; }
     return { before, applied, expired, replayed, cloudCalls: w.cloudCalls, device: w.deviceCalls.length, events: w.events };
   });
-  expect(result.before).toEqual({ cloud: 1, device: 0 });
+  expect(result.before).toEqual({ cloud: 2, device: 0 });
   expect(result.applied.steps[0].persisted).toBe(true);
   expect(result.applied.steps[0].physicalConfirmed).toBe(false);
   expect(result.expired).toBe('CONFIRMATION_EXPIRED');
@@ -289,4 +289,96 @@ test('AI-MCP direct upload timeout aborts once without device fallback', async (
     return { code, uploads: w.uploadCalls.length, device: w.deviceCalls.length };
   });
   expect(result).toEqual({ code: 'MCP_TIMEOUT', uploads: 1, device: 0 });
+});
+
+
+test('AI-MCP immediate apply success without elicitation is rejected', async ({ page }) => {
+  await loadTools(page);
+  const result = await page.evaluate(async () => {
+    const w = window as any;
+    w.elicitationAccepted = true;
+    let code = '';
+    try { await w.FastBeeAiMcpTools.applyDraft('draft-no-elicitation', { humanConfirmed: true }); }
+    catch (error: any) { code = error.message; }
+    return { code, events: w.events.length, active: w.FastBeeAiMcpTools.activeCount() };
+  });
+  expect(result).toEqual({ code: 'AI_CONFIRMATION_REQUIRED', events: 0, active: 0 });
+});
+
+test('AI-MCP deferred elicitation and SHA-256 completion recheck pagehide abort', async ({ page }) => {
+  await loadTools(page);
+  await page.addScriptTag({ path: DOCUMENTS });
+  const result = await page.evaluate(async () => {
+    const w = window as any;
+    let confirmResolve: any;
+    w.FastBeeAiMcpTools.configure({ cloudBase: 'https://mcp.fastbee.test', oauthToken: 'oauth-secret', timeoutMs: 1000,
+      confirm: () => new Promise(resolve => { confirmResolve = resolve; }) });
+    const alreadyAborted = new AbortController();
+    alreadyAborted.abort();
+    let earlyError = '';
+    const earlyCloudCalls = w.cloudCalls.length;
+    try { await w.FastBeeAiMcpTools.callTrustedTool('search_documents', { query: 'x' }, alreadyAborted.signal); }
+    catch (error: any) { earlyError = error.message; }
+    if (earlyError !== 'MCP_TIMEOUT' || w.cloudCalls.length !== earlyCloudCalls) throw new Error('PRE_ABORTED_NOT_REJECTED');
+    const applying = w.FastBeeAiMcpTools.applyDraft('draft-deferred', { humanConfirmed: true });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    window.dispatchEvent(new Event('pagehide'));
+    confirmResolve(true);
+    let applyError = '';
+    try { await applying; } catch (error: any) { applyError = error.message; }
+    const file = new File(['deferred'], 'manual.txt');
+    file.arrayBuffer = () => new Promise(resolve => {
+      window.setTimeout(() => resolve(new TextEncoder().encode('deferred').buffer), 0);
+    });
+    const uploading = w.FastBeeAiMcpDocuments.upload(file, { humanConfirmed: true, timeoutMs: 1000 });
+    window.dispatchEvent(new Event('pagehide'));
+    let uploadError = '';
+    try { await uploading; } catch (error: any) { uploadError = error.message; }
+    return { applyError, uploadError, cloudCalls: w.cloudCalls.length, active: w.FastBeeAiMcpTools.activeCount() };
+  });
+  expect(result.applyError).toBe('MCP_TIMEOUT');
+  expect(result.uploadError).toBe('MCP_TIMEOUT');
+  expect(result.cloudCalls).toBe(1);
+  expect(result.active).toBe(0);
+});
+
+test('AI-MCP nested peripheral fields and oversize arrays fail before cloud', async ({ page }) => {
+  await loadTools(page);
+  const result = await page.evaluate(async () => {
+    const w = window as any;
+    const makeJob = (peripheral: any) => ({ jobId: 'nested-' + Math.random(), state: 'awaiting_tool', toolCall: {
+      toolCallId: 'call-nested', name: 'upsert_peripheral', arguments: { draftId: 'd-1', expectedVersion: 1, peripheral } } });
+    const valid = await w.FastBeeAiMcpTools.executeJob(makeJob({ name: 'relay', type: 12, pins: [4], enabled: true }));
+    let unknown = '';
+    try { await w.FastBeeAiMcpTools.executeJob(makeJob({ name: 'relay', type: 12, pins: [4], unexpected: true })); }
+    catch (error: any) { unknown = error.message; }
+    let oversize = '';
+    try { await w.FastBeeAiMcpTools.executeJob(makeJob({ name: 'relay', type: 12, pins: [0,1,2,3,4,5,6,7,8] })); }
+    catch (error: any) { oversize = error.message; }
+    return { valid, unknown, oversize, cloudCalls: w.cloudCalls.length };
+  });
+  expect(result.unknown).toBe('AI_INVALID_TOOL_ARGUMENTS');
+  expect(result.oversize).toBe('AI_INVALID_TOOL_ARGUMENTS');
+  expect(result.cloudCalls).toBe(1);
+});
+
+test('AI-MCP content-length is rejected before text buffering and timeout errors normalize', async ({ page }) => {
+  await loadTools(page);
+  const result = await page.evaluate(async () => {
+    const w = window as any;
+    let textCalls = 0;
+    w.fetch = async () => ({ ok: true, headers: { get: () => '70000' }, body: null,
+      text: async () => { ++textCalls; return '{}'; } });
+    let large = '';
+    try { await w.FastBeeAiMcpTools.callTrustedTool('search_documents', { query: 'x' }); }
+    catch (error: any) { large = error.message; }
+    w.fetch = async () => { throw new Error('socket timeout'); };
+    const job = { jobId: 'job-normalize', state: 'awaiting_tool', toolCall: {
+      toolCallId: 'call-normalize', name: 'search_documents', arguments: { query: 'x' } } };
+    await w.FastBeeAiMcpTools.executeJob(job);
+    return { large, textCalls, deviceError: w.deviceCalls[0].body.error };
+  });
+  expect(result.large).toBe('MCP_RESULT_TOO_LARGE');
+  expect(result.textCalls).toBe(0);
+  expect(result.deviceError).toBe('MCP_TIMEOUT');
 });

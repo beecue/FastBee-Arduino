@@ -42,6 +42,16 @@ void addTool(JsonArray tools, const char* name, const char* description, bool ac
 }
 }
 
+bool AiProviderClient::pumpWait(int available, size_t total, int length, uint32_t deadlineAtMs,
+                                const std::atomic<bool>* cancelRequested) {
+    if (cancelRequested && cancelRequested->load()) return false;
+    if (available > 0 || (length >= 0 && total >= static_cast<size_t>(length))) return true;
+    const uint32_t now = static_cast<uint32_t>(millis());
+    if (deadlineAtMs && static_cast<int32_t>(deadlineAtMs - now) <= 0) return false;
+    delay(1);
+    return true;
+}
+
 String AiProviderClient::safeError(AiProviderError error) {
     switch (error) {
         case AiProviderError::TIMEOUT: return "AI_TIMEOUT";
@@ -79,7 +89,7 @@ bool AiProviderClient::buildRequest(const AiProviderRequest& request, JsonDocume
     JsonArray messages = output["messages"].to<JsonArray>();
     messages.add<JsonObject>()["role"] = "system";
     messages[0]["content"] = request.systemPrompt;
-    const size_t historyStart = request.history.size() > 4 ? request.history.size() - 4 : 0;
+    const size_t historyStart = request.history.size() > 8 ? request.history.size() - 8 : 0;
     for (size_t i = historyStart; i < request.history.size(); ++i) {
         JsonObject message = messages.add<JsonObject>();
         message["role"] = request.history[i].first;
@@ -219,6 +229,12 @@ AiProviderResult AiProviderClient::complete(const AiProviderRequest& request, Ai
     (void)reply;
     return AiProviderResult::failure(AiProviderError::TRANSPORT);
 #else
+    const uint32_t deadlineAtMs = request.deadlineAtMs ? request.deadlineAtMs : millis() + 20000UL;
+    auto remaining = [&]() -> uint32_t {
+        const int32_t left = static_cast<int32_t>(deadlineAtMs - millis());
+        return left > 0 ? static_cast<uint32_t>(left) : 0;
+    };
+    if (!remaining()) return AiProviderResult::failure(AiProviderError::TIMEOUT);
     String validation;
     if (!AiConfigStore::validateProvider(request.config, validation) || request.config.apiKey.isEmpty() ||
         time(nullptr) < 1577836800) {
@@ -232,21 +248,27 @@ AiProviderResult AiProviderClient::complete(const AiProviderRequest& request, Ai
     WiFiClientSecure secure;
     secure.setCACertBundle(x509_crt_bundle_start,
                            static_cast<size_t>(x509_crt_bundle_end - x509_crt_bundle_start));
-    secure.setHandshakeTimeout(5);
+    secure.setHandshakeTimeout(remaining() > 5000 ? 5 : 1);
     HTTPClient http;
     if (!http.begin(static_cast<NetworkClient&>(secure), completionUrl(request.config))) {
         return AiProviderResult::failure(AiProviderError::TRANSPORT);
     }
-    http.setConnectTimeout(5000);
-    http.setTimeout(20000);
+    http.setConnectTimeout(remaining() > 5000 ? 5000 : remaining());
+    http.setTimeout(remaining() > 20000 ? 20000 : remaining());
     http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
     http.setReuse(false);
     http.addHeader("Content-Type", "application/json");
     http.addHeader("Accept", "application/json");
     http.addHeader("Authorization", "Bearer " + request.config.apiKey);
+    if (!remaining()) {
+        http.end();
+        return AiProviderResult::failure(AiProviderError::TIMEOUT);
+    }
     const int status = http.POST(reinterpret_cast<uint8_t*>(const_cast<char*>(serialized.c_str())), serialized.length());
     AiProviderResult result;
-    if (status == HTTP_CODE_UNAUTHORIZED || status == HTTP_CODE_FORBIDDEN) {
+    if (!remaining()) {
+        result = AiProviderResult::failure(AiProviderError::TIMEOUT);
+    } else if (status == HTTP_CODE_UNAUTHORIZED || status == HTTP_CODE_FORBIDDEN) {
         result = AiProviderResult::failure(AiProviderError::UNAUTHORIZED);
     } else if (status == 429) {
         result = AiProviderResult::failure(AiProviderError::RATE_LIMITED);
@@ -262,21 +284,28 @@ AiProviderResult AiProviderClient::complete(const AiProviderRequest& request, Ai
             NetworkClient* stream = http.getStreamPtr();
             uint8_t buffer[512];
             size_t total = 0;
-            while (stream && http.connected() && total < kMaxResponseBytes + 1) {
+            bool completed = true;
+            while (stream && total < kMaxResponseBytes + 1) {
                 const int available = stream->available();
+                if (!pumpWait(available, total, length, deadlineAtMs, request.cancelRequested)) {
+                    completed = false;
+                    break;
+                }
                 if (available > 0) {
                     const size_t wanted = available > static_cast<int>(sizeof(buffer)) ? sizeof(buffer) : available;
                     const size_t got = stream->readBytes(buffer, wanted);
-                    if (!got) break;
+                    if (!got) {
+                        completed = false;
+                        break;
+                    }
                     response.concat(reinterpret_cast<const char*>(buffer), got);
                     total += got;
                 } else if (length >= 0 && total >= static_cast<size_t>(length)) {
                     break;
-                } else {
-                    delay(1);
                 }
             }
-            if (total > kMaxResponseBytes) result = AiProviderResult::failure(AiProviderError::RESPONSE_TOO_LARGE);
+            if (!completed) result = AiProviderResult::failure(AiProviderError::TIMEOUT);
+            else if (total > kMaxResponseBytes) result = AiProviderResult::failure(AiProviderError::RESPONSE_TOO_LARGE);
             else if (!parseResponse(response, request.allowedTools.empty()
                     ? std::vector<String>{"create_gpio_output", "create_dht_sensor"}
                     : request.allowedTools, reply, error)) {

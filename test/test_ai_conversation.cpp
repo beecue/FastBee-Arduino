@@ -10,6 +10,18 @@
 
 namespace {
 
+class CancelTransport : public AiProviderTransport {
+public:
+    int calls = 0;
+    AiProviderResult complete(const AiProviderRequest& request, AiProviderReply&) override {
+        ++calls;
+        while (!request.cancelRequested || !*request.cancelRequested) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return AiProviderResult::failure(AiProviderError::TIMEOUT);
+    }
+};
+
 class FakeTransport : public AiProviderTransport {
 public:
     std::deque<AiProviderResult> results;
@@ -146,6 +158,24 @@ void test_provider_timeout_and_resource_denial_do_not_pause_other_tasks() {
     denied.stop();
 }
 
+void test_async_retirement_cancels_provider_without_framework_wait() {
+    CancelTransport transport;
+    AiProposalService proposals;
+    AiConversationManager manager(transport, proposals);
+    String error;
+    TEST_ASSERT_TRUE(manager.start(error));
+    String jobId;
+    TEST_ASSERT_TRUE(manager.submit({"a"}, "wait", "", jobId).success);
+    for (int i = 0; i < 100 && transport.calls == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    TEST_ASSERT_EQUAL(1, transport.calls);
+    const uint32_t started = millis();
+    manager.requestStop();
+    TEST_ASSERT_LESS_THAN(100, static_cast<int>(millis() - started));
+    for (int i = 0; i < 200 && manager.isWorkerActive(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    TEST_ASSERT_FALSE(manager.isWorkerActive());
+    TEST_ASSERT_FALSE(manager.isRunning());
+}
+
 } // namespace
 
 void test_ai_conversation_group() {
@@ -153,4 +183,5 @@ void test_ai_conversation_group() {
     RUN_TEST(test_local_tool_becomes_trusted_proposal_not_direct_write);
     RUN_TEST(test_single_active_job_limits_cancel_and_cleanup);
     RUN_TEST(test_provider_timeout_and_resource_denial_do_not_pause_other_tasks);
+    RUN_TEST(test_async_retirement_cancels_provider_without_framework_wait);
 }

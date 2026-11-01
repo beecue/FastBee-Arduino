@@ -71,8 +71,10 @@ int executionStatus(const String& code) {
 }
 
 bool AiRouteHandler::admit(AsyncWebServerRequest* request, bool developer) {
-    if (!ctx_->requireSameOrigin(request) || !ctx_->requireAuth(request)) return false;
-    return !developer || ctx_->requireDeveloperMode(request);
+    const bool allowed = ctx_->requireSameOrigin(request) && ctx_->requireAuth(request) &&
+                         (!developer || ctx_->requireDeveloperMode(request));
+    if (!allowed) releaseBody(request);
+    return allowed;
 }
 
 void AiRouteHandler::accumulateBody(AsyncWebServerRequest* request, uint8_t* data, size_t len,

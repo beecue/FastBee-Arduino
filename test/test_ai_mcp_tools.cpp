@@ -66,6 +66,14 @@ void test_catalog_is_pruned_and_arguments_are_strict() {
     deserializeJson(args, "{}");
     TEST_ASSERT_FALSE(AiMcpToolBridge::validateCall("read_peripheral", args.as<JsonVariantConst>(), error));
     TEST_ASSERT_FALSE(AiMcpToolBridge::validateCall("apply_configuration_draft", args.as<JsonVariantConst>(), error));
+    deserializeJson(args, "{\"draftId\":\"d-1\",\"expectedVersion\":1,\"peripheral\":{\"name\":\"relay\",\"type\":12,\"pins\":[4],\"enabled\":true}}");
+    TEST_ASSERT_TRUE(AiMcpToolBridge::validateCall("upsert_peripheral", args.as<JsonVariantConst>(), error));
+    deserializeJson(args, "{\"draftId\":\"d-1\",\"expectedVersion\":1,\"peripheral\":{\"name\":\"relay\",\"type\":12,\"pins\":[4],\"unexpected\":true}}");
+    TEST_ASSERT_FALSE(AiMcpToolBridge::validateCall("upsert_peripheral", args.as<JsonVariantConst>(), error));
+    deserializeJson(args, "{\"draftId\":\"d-1\",\"expectedVersion\":1,\"peripheral\":{\"name\":\"relay\",\"type\":12,\"pins\":[0,1,2,3,4,5,6,7,8]}}");
+    TEST_ASSERT_FALSE(AiMcpToolBridge::validateCall("upsert_peripheral", args.as<JsonVariantConst>(), error));
+    deserializeJson(args, "{\"draftId\":\"d-1\",\"expectedVersion\":1,\"peripheral\":{\"name\":\"relay\",\"type\":12,\"pins\":[4],\"pinCount\":2}}");
+    TEST_ASSERT_FALSE(AiMcpToolBridge::validateCall("upsert_peripheral", args.as<JsonVariantConst>(), error));
 }
 
 void test_single_awaiting_tool_roundtrip_and_stale_result_rejection() {

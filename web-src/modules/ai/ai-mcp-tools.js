@@ -35,6 +35,81 @@
     function utf8Size(text) {
         return typeof TextEncoder === 'function' ? new TextEncoder().encode(text).length : unescape(encodeURIComponent(text)).length;
     }
+    function throwIfAborted(signal) {
+        if (signal && signal.aborted) throw error('MCP_TIMEOUT');
+    }
+    function normalizeError(e, signal) {
+        if (signal && signal.aborted) return 'MCP_TIMEOUT';
+        var name = e && e.name ? String(e.name) : '';
+        var message = e && e.message ? String(e.message) : '';
+        if (name === 'AbortError' || name === 'TimeoutError' || /timeout|timed out|abort/i.test(message)) return 'MCP_TIMEOUT';
+        return message || 'MCP_TOOL_FAILED';
+    }
+    function readJsonResponse(response, maxBytes, signal) {
+        maxBytes = maxBytes || 65536;
+        throwIfAborted(signal);
+        var declared = Number(response.headers && response.headers.get('Content-Length'));
+        if (Number.isFinite(declared) && declared > maxBytes) {
+            if (response.body && typeof response.body.cancel === 'function') response.body.cancel().catch(function () {});
+            throw error('MCP_RESULT_TOO_LARGE');
+        }
+        function parse(text) {
+            if (utf8Size(text) > maxBytes) throw error('MCP_RESULT_TOO_LARGE');
+            var body;
+            try { body = JSON.parse(text); } catch (_) { throw error('MCP_INVALID_RESPONSE'); }
+            if (!response.ok) throw error((body && body.code) || 'MCP_UNAVAILABLE');
+            return body;
+        }
+        if (response.body && typeof response.body.getReader === 'function') {
+            var reader = response.body.getReader();
+            var chunks = [];
+            var total = 0;
+            function pump() {
+                throwIfAborted(signal);
+                return reader.read().then(function (part) {
+                    if (part.done) {
+                        var merged = new Uint8Array(total);
+                        var offset = 0;
+                        chunks.forEach(function (chunk) { merged.set(chunk, offset); offset += chunk.length; });
+                        return parse(new TextDecoder().decode(merged));
+                    }
+                    var value = part.value || new Uint8Array();
+                    total += value.byteLength;
+                    if (total > maxBytes) {
+                        return reader.cancel().then(function () { throw error('MCP_RESULT_TOO_LARGE'); });
+                    }
+                    chunks.push(value);
+                    return pump();
+                });
+            }
+            return pump().catch(function (e) {
+                reader.cancel().catch(function () {});
+                throw e;
+            });
+        }
+        return response.text().then(parse);
+    }
+    function validatePeripheral(peripheral) {
+        if (!isObject(peripheral) || utf8Size(JSON.stringify(peripheral)) > 2048) throw error('AI_INVALID_TOOL_ARGUMENTS');
+        var allowed = ['id', 'name', 'type', 'enabled', 'pinCount', 'pins', 'activeHigh', 'sampleInterval'];
+        Object.keys(peripheral).forEach(function (key) {
+            if (allowed.indexOf(key) < 0) throw error('AI_INVALID_TOOL_ARGUMENTS');
+        });
+        if (typeof peripheral.name !== 'string' || !peripheral.name || peripheral.name.length > 64 ||
+            !Number.isInteger(peripheral.type) || peripheral.type < 1 || peripheral.type > 60 ||
+            !Array.isArray(peripheral.pins) || peripheral.pins.length < 1 || peripheral.pins.length > 8) {
+            throw error('AI_INVALID_TOOL_ARGUMENTS');
+        }
+        peripheral.pins.forEach(function (pin) {
+            if (!Number.isInteger(pin) || pin < 0 || pin > 48) throw error('AI_INVALID_TOOL_ARGUMENTS');
+        });
+        if (peripheral.id !== undefined && (typeof peripheral.id !== 'string' || peripheral.id.length > 40)) throw error('AI_INVALID_TOOL_ARGUMENTS');
+        if (peripheral.enabled !== undefined && typeof peripheral.enabled !== 'boolean') throw error('AI_INVALID_TOOL_ARGUMENTS');
+        if (peripheral.activeHigh !== undefined && typeof peripheral.activeHigh !== 'boolean') throw error('AI_INVALID_TOOL_ARGUMENTS');
+        if (peripheral.pinCount !== undefined && peripheral.pinCount !== peripheral.pins.length) throw error('AI_INVALID_TOOL_ARGUMENTS');
+        if (peripheral.sampleInterval !== undefined && (!Number.isInteger(peripheral.sampleInterval) ||
+            peripheral.sampleInterval < 20 || peripheral.sampleInterval > 3600000)) throw error('AI_INVALID_TOOL_ARGUMENTS');
+    }
     function validateModelCall(call) {
         if (!isObject(call) || Object.keys(call).length !== 3 || typeof call.toolCallId !== 'string' ||
             !call.toolCallId || call.toolCallId.length > 128 || typeof call.name !== 'string' ||
@@ -51,6 +126,7 @@
             var value = call.arguments[required[j]];
             if (value === undefined || value === null || value === '') throw error('AI_INVALID_TOOL_ARGUMENTS');
         }
+        if (call.name === 'upsert_peripheral') validatePeripheral(call.arguments.peripheral);
         if (call.name === 'request_document_upload') {
             var size = call.arguments.size;
             var digest = call.arguments.sha256;
@@ -74,6 +150,7 @@
         }
     }
     function post(payload, signal) {
+        throwIfAborted(signal);
         var controller = new AbortController();
         var abort = function () { controller.abort(); };
         if (signal) signal.addEventListener('abort', abort, { once: true });
@@ -82,13 +159,7 @@
             headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + oauthToken },
             body: JSON.stringify(payload)
         }).then(function (response) {
-            return response.text().then(function (text) {
-                if (utf8Size(text) > 65536) throw error('MCP_RESULT_TOO_LARGE');
-                var body;
-                try { body = JSON.parse(text); } catch (_) { throw error('MCP_INVALID_RESPONSE'); }
-                if (!response.ok) throw error((body && body.code) || 'MCP_UNAVAILABLE');
-                return body;
-            });
+            return readJsonResponse(response, 65536, signal);
         }).finally(function () {
             if (signal) signal.removeEventListener('abort', abort);
         });
@@ -112,6 +183,35 @@
                 return body.result;
             });
     }
+    function rpcApply(draftId, signal) {
+        var id = nextId++;
+        var elicitationSeen = false;
+        var accepted = false;
+        throwIfAborted(signal);
+        return post({ jsonrpc: '2.0', id: id, method: 'tools/call', params: {
+            name: 'apply_configuration_draft', arguments: { draftId: draftId } } }, signal)
+            .then(function message(body) {
+                throwIfAborted(signal);
+                if (body && body.method === 'elicitation/create') {
+                    if (elicitationSeen || accepted) throw error('AI_UNEXPECTED_CONFIRMATION');
+                    if (!confirmHandler) throw error('AI_CONFIRMATION_REQUIRED');
+                    elicitationSeen = true;
+                    return Promise.resolve(confirmHandler({ message: body.params && body.params.message,
+                        risk: body.params && body.params.risk })).then(function (humanAccepted) {
+                        throwIfAborted(signal);
+                        if (!humanAccepted) throw error('CONFIRMATION_REJECTED');
+                        accepted = true;
+                        return post({ jsonrpc: '2.0', id: body.id, result: {
+                            action: 'accept', content: { confirmationText: '确认执行' } } }, signal).then(message);
+                    });
+                }
+                if (!body || body.id !== id) throw error('MCP_INVALID_RESPONSE');
+                if (body.error) throw error((typeof body.error.message === 'string' && body.error.message) || body.error.code || 'MCP_TOOL_FAILED');
+                if (!elicitationSeen || !accepted) throw error('AI_CONFIRMATION_REQUIRED');
+                if (!isObject(body.result)) throw error('MCP_INVALID_RESPONSE');
+                return body.result;
+            });
+    }
     function executeJob(job) {
         if (!job || typeof job.jobId !== 'string' || job.state !== 'awaiting_tool' || active[job.jobId]) {
             return Promise.reject(error('AI_INVALID_JOB'));
@@ -127,8 +227,7 @@
             resultText = JSON.stringify(result);
             if (utf8Size(resultText) > 16384) throw error('MCP_RESULT_TOO_LARGE');
         }).catch(function (e) {
-            resultError = e && e.name === 'AbortError' ? 'MCP_TIMEOUT' : (e && e.message) || 'MCP_TOOL_FAILED';
-            resultError = resultError.slice(0, 128);
+            resultError = normalizeError(e, controller.signal).slice(0, 128);
         }).then(function () {
             var body = { toolCallId: call.toolCallId };
             if (resultError) body.error = resultError;
@@ -156,13 +255,12 @@
         var controller = new AbortController();
         active[key] = controller;
         var timeout = setTimeout(function () { controller.abort(); }, defaultTimeoutMs);
-        return rpc('apply_configuration_draft', { draftId: draftId }, true, controller.signal).then(function (result) {
+        return rpcApply(draftId, controller.signal).then(function (result) {
             window.dispatchEvent(new CustomEvent('fastbee:ai-tool-result', { detail: {
                 draftId: draftId, name: 'apply_configuration_draft', result: result, humanConfirmed: true } }));
             return result;
         }).catch(function (e) {
-            if (e && e.name === 'AbortError') throw error('MCP_TIMEOUT');
-            throw e;
+            throw error(normalizeError(e, controller.signal));
         }).finally(function () {
             clearTimeout(timeout);
             delete active[key];
@@ -193,6 +291,9 @@
         cancel: cancel,
         cancelAll: cancelAll,
         activeCount: function () { return Object.keys(active).length; },
-        baseUrl: function () { return cloudBase; }
+        baseUrl: function () { return cloudBase; },
+        readJson: readJsonResponse,
+        checkSignal: throwIfAborted,
+        normalizeError: normalizeError
     };
 })();

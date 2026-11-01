@@ -38,6 +38,24 @@ bool idOnly(JsonVariantConst args, const char* id) {
     const char* keys[] = {id};
     return keysAre(args, keys, 1) && text(args, id, true);
 }
+bool validPeripheral(JsonVariantConst peripheral) {
+    const char* keys[] = {"id", "name", "type", "enabled", "pinCount", "pins", "activeHigh", "sampleInterval"};
+    if (!peripheral.is<JsonObjectConst>() || !keysAre(peripheral, keys, 8) ||
+        measureJson(peripheral) > 2048 || !text(peripheral, "name", true, 64) ||
+        !text(peripheral, "id", false, 40) || !integer(peripheral, "type", true, 1, 60) ||
+        !integer(peripheral, "pinCount", false, 1, 8) ||
+        !integer(peripheral, "sampleInterval", false, 20, 3600000) ||
+        !peripheral["pins"].is<JsonArrayConst>()) return false;
+    JsonArrayConst pins = peripheral["pins"];
+    if (pins.size() < 1 || pins.size() > 8) return false;
+    for (JsonVariantConst pin : pins) {
+        if (!pin.is<int>() || pin.as<int>() < 0 || pin.as<int>() > 48) return false;
+    }
+    if (!peripheral["enabled"].isNull() && !peripheral["enabled"].is<bool>()) return false;
+    if (!peripheral["activeHigh"].isNull() && !peripheral["activeHigh"].is<bool>()) return false;
+    if (!peripheral["pinCount"].isNull() && peripheral["pinCount"].as<int>() != static_cast<int>(pins.size())) return false;
+    return true;
+}
 }
 
 const std::vector<String>& AiMcpToolBridge::toolNames() {
@@ -82,7 +100,7 @@ bool AiMcpToolBridge::validateCall(const String& name, JsonVariantConst argument
         const char* keys[] = {"draftId", "expectedVersion", "peripheral"};
         if (!keysAre(arguments, keys, 3) || !text(arguments, "draftId", true) ||
             !integer(arguments, "expectedVersion", true, 1, 1000000) ||
-            !arguments["peripheral"].is<JsonObjectConst>()) return false;
+            !validPeripheral(arguments["peripheral"])) return false;
     } else if (name == "remove_peripheral" || name == "set_peripheral_enabled") {
         const char* keys[] = {"draftId", "expectedVersion", "peripheralId", "enabled"};
         if (!keysAre(arguments, keys, name == "set_peripheral_enabled" ? 4 : 3) ||

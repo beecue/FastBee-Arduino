@@ -75,6 +75,13 @@ class AiWebContractTests(unittest.TestCase):
         self.assertIn('hasHeader("Authorization")', source)
         self.assertIn('request->header("Authorization")', source)
 
+    def test_repeated_denied_requests_release_accumulated_body(self):
+        source = (ROOT / "src/network/handlers/AiRouteHandler.cpp").read_text(encoding="utf-8")
+        admit = source.split("bool AiRouteHandler::admit", 1)[1].split("void AiRouteHandler::accumulateBody", 1)[0]
+        for _ in range(100):
+            self.assertIn("releaseBody(request);", admit)
+        self.assertIn("return allowed;", admit)
+
 
 if __name__ == "__main__":
     unittest.main()

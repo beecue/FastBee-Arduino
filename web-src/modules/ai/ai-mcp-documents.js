@@ -67,8 +67,7 @@
         var timer = setTimeout(onPageHide, timeoutMs);
         window.addEventListener('pagehide', onPageHide, { once: true });
         return uploadConfirmed(file, options, controller.signal).catch(function (error) {
-            if (error && error.name === 'AbortError') throw new Error('MCP_TIMEOUT');
-            throw error;
+            throw new Error(FastBeeAiMcpTools.normalizeError(error, controller.signal));
         }).finally(function () {
             clearTimeout(timer);
             window.removeEventListener('pagehide', onPageHide);
@@ -82,24 +81,24 @@
             return Promise.reject(new Error('DOCUMENT_TYPE_UNSUPPORTED'));
         }
         return sha256(file).then(function (digest) {
+            FastBeeAiMcpTools.checkSignal(signal);
             return FastBeeAiMcpTools.callTrustedTool('request_document_upload', {
                 fileName: file.name, size: file.size, contentType: file.type || 'application/octet-stream', sha256: digest
             }, signal).then(function (ticket) {
+                FastBeeAiMcpTools.checkSignal(signal);
                 var id = ticket && (ticket.uploadTicket || ticket.ticket);
                 if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(id)) throw new Error('MCP_INVALID_RESPONSE');
                 return { ticket: id, tools: FastBeeAiMcpTools };
             });
         }).then(function (pending) {
+            FastBeeAiMcpTools.checkSignal(signal);
             var uploadBase = pending.tools.baseUrl();
             if (!/^https:\/\//.test(uploadBase || '')) throw new Error('AI_INVALID_MCP_CONFIG');
             return window.fetch(uploadBase.replace(/\/+$/, '') + '/upload/v1/' + encodeURIComponent(pending.ticket), {
                 method: 'POST', credentials: 'omit', headers: { 'Content-Type': 'application/octet-stream' }, body: file,
                 signal: signal
             }).then(function (response) {
-                return response.text().then(function (text) {
-                    var body = {};
-                    try { body = JSON.parse(text); } catch (_) {}
-                    if (!response.ok) throw new Error(body.code || 'DOCUMENT_UPLOAD_FAILED');
+                return FastBeeAiMcpTools.readJson(response, 65536, signal).then(function (body) {
                     return FastBeeAiMcpTools.callTrustedTool('get_document_status', { documentId: body.documentId }, signal);
                 });
             });
@@ -111,8 +110,7 @@
         var timer = setTimeout(onPageHide, 20000);
         window.addEventListener('pagehide', onPageHide, { once: true });
         return FastBeeAiMcpTools.callTrustedTool(name, args, controller.signal).catch(function (error) {
-            if (error && error.name === 'AbortError') throw new Error('MCP_TIMEOUT');
-            throw error;
+            throw new Error(FastBeeAiMcpTools.normalizeError(error, controller.signal));
         }).finally(function () {
             clearTimeout(timer);
             window.removeEventListener('pagehide', onPageHide);

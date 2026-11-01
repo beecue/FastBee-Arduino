@@ -95,14 +95,17 @@ bool AiConversationManager::start(String& error) {
     return true;
 }
 
-void AiConversationManager::stop() {
+void AiConversationManager::requestStop() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!running_) return;
         running_ = false;
         if (current_) current_->cancelRequested = true;
     }
     condition_.notify_all();
+}
+
+void AiConversationManager::stop() {
+    requestStop();
 #ifdef UNIT_TEST
     if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) worker_.join();
 #else
@@ -299,6 +302,8 @@ void AiConversationManager::runJob(std::shared_ptr<Job> job) {
         request.toolName = previousToolName;
         request.toolArgumentsJson = previousArguments;
         request.toolResult = previousResult;
+        request.deadlineAtMs = job->startedAtMs + deadlineMs;
+        request.cancelRequested = &job->cancelRequested;
         AiProviderReply reply;
         AiProviderResult provider = configProvider_ && configProvider_(request.config)
             ? transport_.complete(request, reply)

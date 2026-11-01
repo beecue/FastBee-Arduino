@@ -107,7 +107,7 @@ void syncAiFeature() {
         String error;
         if (candidate && candidate->conversation.start(error)) aiRuntime = std::move(candidate);
     } else if (!enabled && aiRuntime) {
-        aiRuntime->conversation.stop();
+        aiRuntime->conversation.requestStop();
         if (!aiRuntime->conversation.isWorkerActive()) aiRuntime.reset();
     }
 }
@@ -1925,7 +1925,7 @@ void FastBeeFramework::shutdown() {
 
 #if FASTBEE_ENABLE_AI
     if (aiRuntime) {
-        aiRuntime->conversation.stop();
+        aiRuntime->conversation.requestStop();
         if (!aiRuntime->conversation.isWorkerActive()) aiRuntime.reset();
     }
 #endif
