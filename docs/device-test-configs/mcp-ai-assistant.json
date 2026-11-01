@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "purpose": "MCP/AI 配置链路的授权实机验收输入占位；不是设备当前配置，不得直接导入设备。",
+  "requiredDeviceChecks": [
+    "核对当前 MAC、芯片、Flash/PSRAM、分区、活动 OTA 槽与 STA 地址",
+    "备份设备身份、网络、认证、MQTT、外设、协议、规则、屏幕布局及非 Web 文件",
+    "确认 AI/MCP 功能开关、模型连接与 MCP 配对均来自用户授权"
+  ],
+  "scenarios": [
+    "safe-peripheral-draft",
+    "disabled-linkage-rule",
+    "mqtt-reporting",
+    "modbus-poll-from-document",
+    "revision-conflict-recovery"
+  ],
+  "evidenceLevels": {
+    "local": "allowed",
+    "build": "allowed",
+    "deviceApi": "pending-authorized-device",
+    "physical": "pending-authorized-device",
+    "longTerm": "pending-8h-24h-72h"
+  },
+  "notes": "本文件只定义验收身份/场景边界，不包含 WiFi、MQTT、模型 Key、Cookie 或其他秘密。"
+}
