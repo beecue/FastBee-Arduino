@@ -9,6 +9,7 @@
 #include "core/FastBeeFramework.h"
 #include "core/RuntimeFeatureManager.h"
 #include "network/WebHandlerContext.h"
+#include "network/handlers/AiRoutePath.h"
 #include "security/AuthManager.h"
 
 namespace {
@@ -247,7 +248,10 @@ void AiRouteHandler::handleJobCancel(AsyncWebServerRequest* request) {
         return;
     }
     if (!admit(request)) return;
-    if (!path.endsWith("/cancel")) { ctx_->sendBadRequest(request, "AI_INVALID_JOB_PATH"); return; }
+    if (rejectInvalidJobPostPath(path, [request]() { releaseBody(request); })) {
+        ctx_->sendBadRequest(request, "AI_INVALID_JOB_PATH");
+        return;
+    }
     const String jobId = path.substring(0, path.length() - 7);
     AiConversationManager* manager = FastBeeFramework::getInstance()->getAiConversationManager();
     if (!manager || !manager->cancel(requestOwner(ctx_, request), jobId)) {

@@ -1,12 +1,99 @@
 #include <unity.h>
+#define FASTBEE_TEST_WINDOWS_SOCKETS
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <vector>
+#include <thread>
+#include <string>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+using SocketFd = SOCKET;
+constexpr SocketFd kInvalidSocket = INVALID_SOCKET;
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+using SocketFd = int;
+constexpr SocketFd kInvalidSocket = -1;
+#endif
 
 #include "protocols/AiProviderClient.h"
 #include "../src/protocols/AiProviderClient.cpp"
 
 namespace {
+
+#ifdef _WIN32
+struct SocketRuntime {
+    WSADATA data;
+    SocketRuntime() { WSAStartup(MAKEWORD(2, 2), &data); }
+    ~SocketRuntime() { WSACleanup(); }
+};
+SocketRuntime socketRuntime;
+void closeSocket(SocketFd fd) { closesocket(fd); }
+#else
+struct SocketRuntime {};
+SocketRuntime socketRuntime;
+void closeSocket(SocketFd fd) { close(fd); }
+#endif
+
+std::string receiveActualHttp(const std::string& response) {
+    const SocketFd listener = socket(AF_INET, SOCK_STREAM, 0);
+    TEST_ASSERT_TRUE(listener != kInvalidSocket);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = 0;
+    TEST_ASSERT_EQUAL(0, bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)));
+    TEST_ASSERT_EQUAL(0, listen(listener, 1));
+    socklen_t addressLength = sizeof(address);
+    TEST_ASSERT_EQUAL(0, getsockname(listener, reinterpret_cast<sockaddr*>(&address), &addressLength));
+    const uint16_t port = ntohs(address.sin_port);
+    std::thread server([&]() {
+        const SocketFd client = accept(listener, nullptr, nullptr);
+        if (client != kInvalidSocket) {
+            size_t sent = 0;
+            while (sent < response.size()) {
+                const int result = send(client, response.data() + sent, static_cast<int>(response.size() - sent), 0);
+                if (result <= 0) break;
+                sent += static_cast<size_t>(result);
+            }
+            closeSocket(client);
+        }
+        closeSocket(listener);
+    });
+    const SocketFd client = socket(AF_INET, SOCK_STREAM, 0);
+    TEST_ASSERT_TRUE(client != kInvalidSocket);
+    TEST_ASSERT_EQUAL(0, connect(client, reinterpret_cast<sockaddr*>(&address), sizeof(address)));
+    std::string raw;
+    char buffer[512];
+    while (true) {
+        const int count = recv(client, buffer, sizeof(buffer), 0);
+        if (count <= 0) break;
+        raw.append(buffer, static_cast<size_t>(count));
+    }
+    closeSocket(client);
+    server.join();
+    return raw;
+}
+
+class BufferedStream : public AiProviderStream {
+public:
+    explicit BufferedStream(std::string data) : data_(std::move(data)) {}
+    int available() override { return static_cast<int>(data_.size() - position_); }
+    size_t readBytes(uint8_t* data, size_t length) override {
+        const size_t count = std::min(length, data_.size() - position_);
+        if (count) std::memcpy(data, data_.data() + position_, count);
+        position_ += count;
+        return count;
+    }
+    bool connected() override { return position_ < data_.size(); }
+private:
+    std::string data_;
+    size_t position_ = 0;
+};
 
 std::vector<String> localTools() {
     return {"create_gpio_output", "create_dht_sensor"};
@@ -95,6 +182,37 @@ void test_unknown_length_no_data_is_bounded_and_cancellable() {
     TEST_ASSERT_FALSE(AiProviderClient::pumpWait(0, 0, -1, millis() + 10000, &cancelled));
 }
 
+void test_available_data_also_honors_deadline() {
+    TEST_ASSERT_FALSE(AiProviderClient::pumpWait(1, 0, -1, millis() - 1, nullptr));
+}
+
+void test_actual_http_unknown_length_clean_eof_completes() {
+    const std::string payload = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}";
+    const std::string raw = receiveActualHttp("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n" + payload);
+    const size_t bodyStart = raw.find("\r\n\r\n");
+    TEST_ASSERT_TRUE(bodyStart != std::string::npos);
+    BufferedStream stream(raw.substr(bodyStart + 4));
+    String response;
+    TEST_ASSERT_EQUAL(static_cast<int>(AiHttpReadStatus::COMPLETE),
+                      static_cast<int>(AiProviderClient::readResponse(stream, -1, millis() + 1000, nullptr, response)));
+    TEST_ASSERT_EQUAL_STRING(payload.c_str(), response.c_str());
+}
+
+void test_actual_http_chunked_clean_eof_completes() {
+    const std::string payload = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}";
+    char chunkHeader[16];
+    snprintf(chunkHeader, sizeof(chunkHeader), "%zx", payload.size());
+    const std::string raw = receiveActualHttp("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n" +
+        std::string(chunkHeader) + "\r\n" + payload + "\r\n0\r\n\r\n");
+    const size_t bodyStart = raw.find("\r\n\r\n");
+    TEST_ASSERT_TRUE(bodyStart != std::string::npos);
+    BufferedStream stream(raw.substr(bodyStart + 4));
+    String response;
+    TEST_ASSERT_EQUAL(static_cast<int>(AiHttpReadStatus::COMPLETE),
+                      static_cast<int>(AiProviderClient::readResponse(stream, -1, millis() + 1000, nullptr, response, true)));
+    TEST_ASSERT_EQUAL_STRING(payload.c_str(), response.c_str());
+}
+
 } // namespace
 
 void test_ai_provider_group() {
@@ -104,4 +222,7 @@ void test_ai_provider_group() {
     RUN_TEST(test_request_is_bounded_and_key_only_belongs_to_transport);
     RUN_TEST(test_response_size_and_provider_errors_have_safe_messages);
     RUN_TEST(test_unknown_length_no_data_is_bounded_and_cancellable);
+    RUN_TEST(test_available_data_also_honors_deadline);
+    RUN_TEST(test_actual_http_unknown_length_clean_eof_completes);
+    RUN_TEST(test_actual_http_chunked_clean_eof_completes);
 }

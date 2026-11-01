@@ -16,6 +16,7 @@
 #include "core/RuntimeFeatureManager.h"
 #if FASTBEE_ENABLE_AI
 #include "core/AiConversationManager.h"
+#include "core/AiFeatureLifecycle.h"
 #endif
 #if FASTBEE_ENABLE_SCREEN_PANEL
 #include "core/ScreenPanelManager.h"
@@ -100,15 +101,32 @@ struct AiRuntime {
 };
 std::unique_ptr<AiRuntime> aiRuntime;
 
+void startAiRuntime() {
+    std::unique_ptr<AiRuntime> candidate(new (std::nothrow) AiRuntime());
+    String error;
+    if (candidate && candidate->conversation.start(error)) aiRuntime = std::move(candidate);
+}
+
 void syncAiFeature() {
     const bool enabled = FastBee::RuntimeFeatureManager::instance().shouldEnable("aiAssistant");
-    if (enabled && !aiRuntime) {
-        std::unique_ptr<AiRuntime> candidate(new (std::nothrow) AiRuntime());
-        String error;
-        if (candidate && candidate->conversation.start(error)) aiRuntime = std::move(candidate);
-    } else if (!enabled && aiRuntime) {
-        aiRuntime->conversation.requestStop();
-        if (!aiRuntime->conversation.isWorkerActive()) aiRuntime.reset();
+    const bool running = aiRuntime && aiRuntime->conversation.isRunning();
+    const bool workerActive = aiRuntime && aiRuntime->conversation.isWorkerActive();
+    switch (nextAiFeatureAction(enabled, aiRuntime != nullptr, running, workerActive)) {
+        case AiFeatureAction::REQUEST_STOP:
+            aiRuntime->conversation.requestStop();
+            break;
+        case AiFeatureAction::RESET:
+            aiRuntime.reset();
+            break;
+        case AiFeatureAction::RESET_AND_START:
+            aiRuntime.reset();
+            startAiRuntime();
+            break;
+        case AiFeatureAction::START:
+            startAiRuntime();
+            break;
+        default:
+            break;
     }
 }
 #endif

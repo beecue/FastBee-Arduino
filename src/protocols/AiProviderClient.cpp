@@ -10,6 +10,18 @@
 #include <time.h>
 extern const uint8_t x509_crt_bundle_start[] asm("_binary_x509_crt_bundle_start");
 extern const uint8_t x509_crt_bundle_end[] asm("_binary_x509_crt_bundle_end");
+
+class NetworkClientStream : public AiProviderStream {
+public:
+    explicit NetworkClientStream(NetworkClient* client) : client_(client) {}
+    int available() override { return client_ ? client_->available() : 0; }
+    size_t readBytes(uint8_t* data, size_t length) override {
+        return client_ ? client_->readBytes(data, length) : 0;
+    }
+    bool connected() override { return client_ && client_->connected(); }
+private:
+    NetworkClient* client_;
+};
 #endif
 
 namespace {
@@ -45,11 +57,76 @@ void addTool(JsonArray tools, const char* name, const char* description, bool ac
 bool AiProviderClient::pumpWait(int available, size_t total, int length, uint32_t deadlineAtMs,
                                 const std::atomic<bool>* cancelRequested) {
     if (cancelRequested && cancelRequested->load()) return false;
-    if (available > 0 || (length >= 0 && total >= static_cast<size_t>(length))) return true;
     const uint32_t now = static_cast<uint32_t>(millis());
     if (deadlineAtMs && static_cast<int32_t>(deadlineAtMs - now) <= 0) return false;
+    if (available > 0 || (length >= 0 && total >= static_cast<size_t>(length))) return true;
     delay(1);
     return true;
+}
+
+AiHttpReadStatus AiProviderClient::readResponse(AiProviderStream& stream, int contentLength,
+        uint32_t deadlineAtMs, const std::atomic<bool>* cancelRequested, String& response, bool chunked) {
+    response.clear();
+    enum class ChunkState : uint8_t { SIZE, DATA, DATA_END, TRAILER, DONE };
+    ChunkState chunkState = ChunkState::SIZE;
+    String chunkLine;
+    size_t chunkRemaining = 0;
+    auto consume = [&](uint8_t value) -> bool {
+        switch (chunkState) {
+            case ChunkState::SIZE:
+                if (value == '\n') {
+                    const int extension = chunkLine.indexOf(';');
+                    const String sizeText = extension >= 0 ? chunkLine.substring(0, extension) : chunkLine;
+                    chunkRemaining = static_cast<size_t>(strtoul(sizeText.c_str(), nullptr, 16));
+                    chunkLine = "";
+                    chunkState = chunkRemaining == 0 ? ChunkState::TRAILER : ChunkState::DATA;
+                } else if (value != '\r') {
+                    if (chunkLine.length() >= 24) return false;
+                    chunkLine.concat(static_cast<char>(value));
+                }
+                return true;
+            case ChunkState::DATA:
+                if (chunkRemaining == 0) return false;
+                response.concat(static_cast<char>(value));
+                if (--chunkRemaining == 0) chunkState = ChunkState::DATA_END;
+                return true;
+            case ChunkState::DATA_END:
+                if (value == '\n') chunkState = ChunkState::SIZE;
+                return true;
+            case ChunkState::TRAILER:
+                if (value == '\n') chunkState = ChunkState::DONE;
+                return true;
+            default:
+                return true;
+        }
+    };
+    uint8_t buffer[512];
+    while (response.length() < kMaxResponseBytes + 1) {
+        const int available = stream.available();
+        if (chunked && chunkState == ChunkState::DONE) return AiHttpReadStatus::COMPLETE;
+        if (available <= 0 && contentLength < 0 && !stream.connected()) {
+            return chunked && chunkState != ChunkState::DONE ? AiHttpReadStatus::IO_ERROR : AiHttpReadStatus::COMPLETE;
+        }
+        if (!pumpWait(available, response.length(), contentLength, deadlineAtMs, cancelRequested)) {
+            return AiHttpReadStatus::TIMEOUT;
+        }
+        if (!chunked && contentLength >= 0 && response.length() >= static_cast<size_t>(contentLength)) {
+            return AiHttpReadStatus::COMPLETE;
+        }
+        if (available > 0) {
+            const size_t wanted = available > static_cast<int>(sizeof(buffer)) ? sizeof(buffer) : available;
+            const size_t got = stream.readBytes(buffer, wanted);
+            if (!got) return stream.connected() ? AiHttpReadStatus::IO_ERROR : AiHttpReadStatus::COMPLETE;
+            if (chunked) {
+                for (size_t i = 0; i < got; ++i) {
+                    if (!consume(buffer[i])) return AiHttpReadStatus::IO_ERROR;
+                }
+            } else {
+                response.concat(reinterpret_cast<const char*>(buffer), got);
+            }
+        }
+    }
+    return AiHttpReadStatus::TOO_LARGE;
 }
 
 String AiProviderClient::safeError(AiProviderError error) {
@@ -281,32 +358,14 @@ AiProviderResult AiProviderClient::complete(const AiProviderRequest& request, Ai
         } else {
             String response;
             response.reserve(length > 0 ? length : 4096);
-            NetworkClient* stream = http.getStreamPtr();
-            uint8_t buffer[512];
-            size_t total = 0;
-            bool completed = true;
-            while (stream && total < kMaxResponseBytes + 1) {
-                const int available = stream->available();
-                if (!pumpWait(available, total, length, deadlineAtMs, request.cancelRequested)) {
-                    completed = false;
-                    break;
-                }
-                if (available > 0) {
-                    const size_t wanted = available > static_cast<int>(sizeof(buffer)) ? sizeof(buffer) : available;
-                    const size_t got = stream->readBytes(buffer, wanted);
-                    if (!got) {
-                        completed = false;
-                        break;
-                    }
-                    response.concat(reinterpret_cast<const char*>(buffer), got);
-                    total += got;
-                } else if (length >= 0 && total >= static_cast<size_t>(length)) {
-                    break;
-                }
-            }
-            if (!completed) result = AiProviderResult::failure(AiProviderError::TIMEOUT);
-            else if (total > kMaxResponseBytes) result = AiProviderResult::failure(AiProviderError::RESPONSE_TOO_LARGE);
-            else if (!parseResponse(response, request.allowedTools.empty()
+            NetworkClientStream stream(http.getStreamPtr());
+            const AiHttpReadStatus readStatus = readResponse(stream, length, deadlineAtMs,
+                request.cancelRequested, response, http.header("Transfer-Encoding").equalsIgnoreCase("chunked"));
+            if (readStatus == AiHttpReadStatus::TIMEOUT || readStatus == AiHttpReadStatus::IO_ERROR) {
+                result = AiProviderResult::failure(AiProviderError::TIMEOUT);
+            } else if (readStatus == AiHttpReadStatus::TOO_LARGE) {
+                result = AiProviderResult::failure(AiProviderError::RESPONSE_TOO_LARGE);
+            } else if (!parseResponse(response, request.allowedTools.empty()
                     ? std::vector<String>{"create_gpio_output", "create_dht_sensor"}
                     : request.allowedTools, reply, error)) {
                 result = AiProviderResult::failure(error == "AI_RESPONSE_TOO_LARGE"

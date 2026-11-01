@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "core/AiConfig.h"
+#include "protocols/AiProviderStream.h"
 
 enum class AiProviderError : uint8_t {
     NONE,
@@ -67,6 +68,9 @@ public:
     static String safeError(AiProviderError error);
     static bool pumpWait(int available, size_t total, int length, uint32_t deadlineAtMs,
                          const std::atomic<bool>* cancelRequested);
+    static AiHttpReadStatus readResponse(AiProviderStream& stream, int contentLength,
+                                         uint32_t deadlineAtMs, const std::atomic<bool>* cancelRequested,
+                                         String& response, bool chunked = false);
 };
 
 #endif

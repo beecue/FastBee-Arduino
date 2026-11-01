@@ -18,7 +18,9 @@
 #include <thread>
 #include <vector>
 
+#ifndef FASTBEE_TEST_WINDOWS_SOCKETS
 using boolean = bool;
+#endif
 using byte = uint8_t;
 using std::isinf;
 using std::isnan;
