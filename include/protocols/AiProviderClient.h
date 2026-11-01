@@ -27,6 +27,8 @@ struct AiProviderRequest {
     String documentContext;
     std::vector<std::pair<String, String>> history;
     String toolCallId;
+    String toolName;
+    String toolArgumentsJson;
     String toolResult;
     std::vector<String> allowedTools;
 };

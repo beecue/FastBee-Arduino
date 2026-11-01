@@ -1,3 +1,5 @@
+#include "core/FeatureFlags.h"
+#if FASTBEE_ENABLE_AI || defined(UNIT_TEST)
 #include "core/AiConfig.h"
 
 #include <cstring>
@@ -145,3 +147,4 @@ bool AiConfigStore::saveMcpBaseUrl(const String& baseUrl, String& error) {
     return true;
 #endif
 }
+#endif

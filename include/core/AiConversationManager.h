@@ -48,7 +48,9 @@ public:
     bool isRunning() const { return running_; }
     bool isWorkerActive() const { return workerActive_.load(); }
     AiSubmitResult submit(const AiSessionIdentity& owner, const String& message,
-                          const String& documentContext, String& jobId);
+                          const String& documentContext, String& jobId, bool mcpEnabled = false);
+    bool provideToolResult(const AiSessionIdentity& owner, const String& jobId,
+                           const String& toolCallId, const String& result, const String& error);
     bool getJob(const AiSessionIdentity& owner, const String& jobId, AiJobSnapshot& out) const;
     bool cancel(const AiSessionIdentity& owner, const String& jobId);
     AiExecutionResult executeProposal(const AiSessionIdentity& owner, const String& proposalId,
@@ -67,6 +69,10 @@ private:
         String documentContext;
         uint32_t startedAtMs = 0;
         bool cancelRequested = false;
+        bool mcpEnabled = false;
+        bool toolResultReady = false;
+        String toolResult;
+        String toolResultError;
     };
 
     void workerLoop();
@@ -75,7 +81,7 @@ private:
     static void workerEntry(void* argument);
     TaskHandle_t workerHandle_ = nullptr;
 #endif
-    void runJob(Job job);
+    void runJob(std::shared_ptr<Job> job);
     void finishHistory(const Job& job, const String& assistantText);
     std::vector<std::pair<String, String>> historyFor(const AiSessionIdentity& owner) const;
 

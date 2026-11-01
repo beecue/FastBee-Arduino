@@ -44,7 +44,8 @@ var ModuleLoader = {
             'periph-exec-modbus',
             'periph-exec-form',
             'periph-exec-templates'
-        ]
+        ],
+        'ai-mcp': []
     },
 
     _resolveAssetUrl(path) {

@@ -24,9 +24,10 @@ private:
     void handleJobSubmit(AsyncWebServerRequest* request);
     void handleJobGet(AsyncWebServerRequest* request);
     void handleJobCancel(AsyncWebServerRequest* request);
+    void handleToolResult(AsyncWebServerRequest* request);
     void handleProposalExecute(AsyncWebServerRequest* request);
     void handleSessionClear(AsyncWebServerRequest* request);
-    static constexpr size_t kMaxBodyBytes = 16384;
+    static constexpr size_t kMaxBodyBytes = 32768;
 };
 
 #endif

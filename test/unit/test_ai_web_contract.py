@@ -59,6 +59,22 @@ class AiWebContractTests(unittest.TestCase):
         self.assertIn("histories_.size() >= 8", source)
         self.assertIn("mutex", proposals)
 
+    def test_ai_sources_are_compile_gated(self):
+        for relative in (
+            "src/core/AiConfig.cpp", "src/core/AiConversationManager.cpp",
+            "src/core/AiProposalService.cpp", "src/core/AiMcpToolBridge.cpp",
+            "src/core/PeripheralChangeExecutor.cpp",
+            "src/protocols/AiProviderClient.cpp", "src/network/handlers/AiRouteHandler.cpp",
+        ):
+            source = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn("#if FASTBEE_ENABLE_AI || defined(UNIT_TEST)", source, relative)
+            self.assertTrue(source.rstrip().endswith("#endif"), relative)
+
+    def test_bearer_and_cookie_sessions_have_distinct_owner_binding(self):
+        source = (ROOT / "src/network/handlers/AiRouteHandler.cpp").read_text(encoding="utf-8")
+        self.assertIn('hasHeader("Authorization")', source)
+        self.assertIn('request->header("Authorization")', source)
+
 
 if __name__ == "__main__":
     unittest.main()

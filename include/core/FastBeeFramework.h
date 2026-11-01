@@ -103,7 +103,9 @@ public:
     UserManager* getUserManager() const;
     AuthManager* getAuthManager() const;
     ProtocolManager* getProtocolManager() const;
+#if FASTBEE_ENABLE_AI
     AiConversationManager* getAiConversationManager() const;
+#endif
     
     /**
      * @brief 检测并回填设备身份标识（deviceId 和 MQTT clientId）

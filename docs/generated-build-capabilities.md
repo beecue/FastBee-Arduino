@@ -76,7 +76,7 @@ otaFs 的旧宏保留分区/发布配置兼容；即使宏为 1，当前无文�
 
 | 来源 | 文本 SHA256 |
 | --- | --- |
-| platformio.ini | 41a6fa3b488be2556e03b835f5c6d0ce301a2008702aba4f75a8c3c3e2b8ec49 |
+| platformio.ini | 2cca16d1101aeb94d330433d3befbbf6983196c37d7db9f0b4f1a5fa8c94e214 |
 | scripts/web-profile.js | 545a48a96c2e7ea16d4b778be51a5f3562a8afa97849a68d0a99a0337ef9ba7b |
 | scripts/generate-build-capabilities.js | 2bbb9e1cc6337aac36e7fbe61dff28d8afa7d909f9c246110214845bd3019690 |
 
@@ -92,4 +92,4 @@ otaFs 的旧宏保留分区/发布配置兼容；即使宏为 1，当前无文�
 | esp32c6-F4R0 | a6765707c5f92275cb8d0128a57cb5b97c926dcc4f5cd0dd9196286bc2552ac6 |
 | esp32c6-F8R0 | e23beee75b5fd8c6f138890766afd40d26fea5f8f6915d0c5ab63358fc242349 |
 | esp32s3-F8R8 | 0aef53ea15012fa73e2451004252f46dcdf3bbe9ef13d6295092ee19b425a2a3 |
-| esp32s3-F16R8 | 377fddf04bc66e2fe254c7a9632d97076a5220e24e420818473c5e18541fcbf1 |
+| esp32s3-F16R8 | 0b6ea4446f8d4226bcd5de9311ca245c66e92ea48dd970e51159d7763376152b |

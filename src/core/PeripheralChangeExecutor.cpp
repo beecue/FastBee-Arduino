@@ -1,3 +1,5 @@
+#include "core/FeatureFlags.h"
+#if FASTBEE_ENABLE_AI || defined(UNIT_TEST)
 #include "core/PeripheralChangeExecutor.h"
 
 #include <new>
@@ -41,3 +43,4 @@ bool PeripheralChangeExecutor::add(const PeripheralConfig& config, FBNetworkMana
     }
     return manager.addPeripheralAndSave(config, error);
 }
+#endif

@@ -121,6 +121,9 @@ const FastBee::FeatureBudget kFeatureBudgets[] = {
     // internal allocation on targets without usable PSRAM.
     {"screenPanel", 20},
 #endif
+#if FASTBEE_ENABLE_AI
+    {"aiAssistant", 46},
+#endif
 #if FASTBEE_ENABLE_MQTT
     {"mqtts", 45},           // TLS 握手 ~42KB DRAM（无 PSRAM 准入需 ~52KB 空闲）
 #endif
@@ -1980,13 +1983,11 @@ UserManager* FastBeeFramework::getUserManager() const { return userManager.get()
 AuthManager* FastBeeFramework::getAuthManager() const { return authManager.get(); }
 
 ProtocolManager* FastBeeFramework::getProtocolManager() const { return protocolManager.get(); }
-AiConversationManager* FastBeeFramework::getAiConversationManager() const {
 #if FASTBEE_ENABLE_AI
+AiConversationManager* FastBeeFramework::getAiConversationManager() const {
     return aiRuntime ? &aiRuntime->conversation : nullptr;
-#else
-    return nullptr;
-#endif
 }
+#endif
 
 // 检查系统是否已初始化
 bool FastBeeFramework::isInitialized() const {

@@ -54,7 +54,8 @@ const CAPABILITY_MACROS = Object.freeze({
     ble: 'FASTBEE_ENABLE_BLE',
     ethernet: 'FASTBEE_ENABLE_ETHERNET',
     cellular: 'FASTBEE_ENABLE_CELLULAR',
-    i18n: 'FASTBEE_ENABLE_I18N'
+    i18n: 'FASTBEE_ENABLE_I18N',
+    aiAssistant: 'FASTBEE_ENABLE_AI'
 });
 
 // Independently loadable optional resources are listed here. Array rules mean
@@ -102,7 +103,9 @@ const ASSET_CAPABILITY_REQUIREMENTS = Object.freeze({
     'pages/admin.html': ['userAdmin'],
 
     'js/modules/ir-remote.js': ['irRemote'],
-    'js/modules/rf-remote.js': ['rfLearn']
+    'js/modules/rf-remote.js': ['rfLearn'],
+    'js/modules/ai.js': ['aiAssistant'],
+    'pages/ai.html': ['aiAssistant']
 });
 
 // Every sidebar item must be classified here. Keeping the base pages in the
@@ -120,6 +123,7 @@ const MENU_CAPABILITY_REQUIREMENTS = Object.freeze({
     'rule-script': ['ruleScript'],
     logs: ['logViewer'],
     users: ['userAdmin'],
+    ai: ['aiAssistant'],
     features: []
 });
 

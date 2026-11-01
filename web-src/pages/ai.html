@@ -10,41 +10,40 @@
         <div class="ai-card">
             <div id="ai-feature-hint" class="ai-status ai-hidden">请先到功能配置启用 AI 助手。</div>
             <div id="ai-messages" class="ai-messages" aria-live="polite"></div>
+            <div id="ai-tool-results" class="ai-card ai-hidden" aria-live="polite"></div>
             <div id="ai-proposal" class="ai-card ai-hidden">
                 <p id="ai-proposal-summary"></p>
-                <p class="ai-status">尚未写入设备。确认后将执行资源预检；保存、回读和实物状态分别报告。</p>
+                尚未写入设备。确认后将执行资源预检；保存、回读和实物状态分别报告。
                 <button id="ai-confirm-proposal" type="button" class="fb-btn fb-btn-primary">确认执行</button>
             </div>
             <div id="ai-execution-result" class="ai-result-grid ai-hidden" aria-live="polite"></div>
-            <div class="ai-form-row">
-                <textarea id="ai-message" rows="3" maxlength="2000" placeholder="例如：在 GPIO4 添加一个继电器"></textarea>
-                <button id="ai-send" type="button" class="fb-btn fb-btn-primary">发送</button>
-            </div>
-            <div class="ai-form-row">
-                <input id="ai-document-file" type="file" accept=".pdf,.doc,.docx,.png,.jpg,.jpeg" disabled>
-                <button id="ai-document-upload" type="button" class="fb-btn" disabled>配置 MCP 后可用</button>
-                <button id="ai-cancel" type="button" class="fb-btn" disabled>取消</button>
-            </div>
+            <textarea id="ai-message" rows="3" maxlength="2000" placeholder="例如：在 GPIO4 添加一个继电器"></textarea>
+            <button id="ai-send" type="button" class="fb-btn fb-btn-primary">发送</button>
+            <input id="ai-document-file" type="file" accept=".pdf,.doc,.docx,.png,.jpg,.jpeg" disabled>
+            <button id="ai-document-upload" type="button" class="fb-btn" disabled>配置 MCP 后可用</button>
+            <button id="ai-cancel" type="button" class="fb-btn" disabled>取消</button>
+            <input id="ai-doc-query" class="ai-config-input" type="search" placeholder="检索已授权文档" aria-label="检索已授权文档">
+            <button id="ai-doc-search" type="button" class="fb-btn" disabled>检索并引用</button>
             <div id="ai-chat-status" class="ai-status" role="status"></div>
         </div>
         <button id="ai-issue-draft" type="button" class="fb-btn">生成脱敏 Issue 草稿</button>
         <textarea id="ai-issue-preview" class="ai-issue ai-hidden" readonly></textarea>
     </section>
     <section id="ai-config-panel" class="ai-panel" role="tabpanel">
-        <form id="ai-provider-form" class="ai-card">
-            <h3>本地模型连接</h3>
+        <form id="ai-provider-form" class="ai-card" aria-label="本地模型连接">
             <button id="ai-deepseek-preset" type="button" class="fb-btn">使用 DeepSeek 预设</button>
             <input id="ai-base-url" class="ai-config-input" type="url" aria-label="OpenAI 兼容 HTTPS 地址" placeholder="OpenAI 兼容 HTTPS 地址" required>
             <input id="ai-model" class="ai-config-input" type="text" maxlength="64" aria-label="模型" placeholder="模型" required>
             <input id="ai-api-key" class="ai-config-input" type="password" maxlength="256" aria-label="API Key（留空保留原值）" placeholder="API Key（留空保留原值）" autocomplete="new-password">
             <label><input id="ai-clear-key" type="checkbox"> 清除已保存 Key</label>
-            <div class="ai-form-row"><button id="ai-save-provider" type="submit" class="fb-btn fb-btn-primary">保存本地模型配置</button></div>
+            <button id="ai-save-provider" type="submit" class="fb-btn fb-btn-primary">保存本地模型配置</button>
         </form>
-        <form id="ai-mcp-form" class="ai-card">
-            <h3>可选 MCP 文档与工具</h3>
-            <p class="ai-status">留空即可独立使用本地模型对话和配置草案。配对令牌仅保存在浏览器会话中。</p>
-            <input id="ai-mcp-url" class="ai-config-input" type="url" aria-label="MCP 云端 HTTPS 地址" placeholder="MCP 云端 HTTPS 地址">
-            <div class="ai-form-row"><button id="ai-save-mcp" type="submit" class="fb-btn">保存 MCP 地址</button></div>
+        <form id="ai-mcp-form" class="ai-card" aria-label="可选 MCP 文档与工具">
+            <input id="ai-mcp-url" class="ai-config-input" type="url" aria-label="MCP 云端 HTTPS 地址；留空使用本地模式" placeholder="MCP 云端 HTTPS 地址；留空使用本地模式">
+            <input id="ai-oauth-token" class="ai-config-input" type="password" aria-label="OAuth 令牌（仅本次浏览器会话）" placeholder="OAuth 令牌（仅本次浏览器会话）" autocomplete="off">
+            <input id="ai-pair-code" class="ai-config-input" type="password" aria-label="一次性配对码" placeholder="一次性配对码" autocomplete="off">
+            <button id="ai-save-mcp" type="submit" class="fb-btn">保存 MCP 地址</button>
+            <button id="ai-mcp-connect" type="button" class="fb-btn">配对并连接</button>
         </form>
         <div id="ai-config-status" class="ai-status" role="status"></div>
     </section>

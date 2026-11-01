@@ -80,6 +80,13 @@ const CAPABILITY_WEB_ASSET_BUDGETS = Object.freeze({
         reallocatedBaseGzip: 5.5 * 1024,
         gzipFiles: 4,
         staticHtmlNodesTotal: 220
+    }),
+    aiAssistant: Object.freeze({
+        assets: Object.freeze(['js/modules/ai.js', 'pages/ai.html']),
+        lazyGzip: 32 * 1024,
+        sharedGzip: 0,
+        gzipFiles: 2,
+        staticHtmlNodesTotal: 128
     })
 });
 

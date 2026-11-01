@@ -65,7 +65,7 @@ export default defineConfig({
   projects: [
     {
       name: 'offline-ui',
-      testMatch: /15-ui-regression\.spec\.ts|22-feature-config\.spec\.ts|24-web-smooth-access\.spec\.ts|26-device-control-lifecycle\.spec\.ts|27-web-security-lifecycle\.spec\.ts|29-generic-peripheral-integration\.spec\.ts|31-screen-panel\.spec\.ts|32-periph-exec-remote\.spec\.ts|42-screen-panel-recovery\.spec\.ts|51-ai-chat\.spec\.ts/,
+      testMatch: /15-ui-regression\.spec\.ts|22-feature-config\.spec\.ts|24-web-smooth-access\.spec\.ts|26-device-control-lifecycle\.spec\.ts|27-web-security-lifecycle\.spec\.ts|29-generic-peripheral-integration\.spec\.ts|31-screen-panel\.spec\.ts|32-periph-exec-remote\.spec\.ts|42-screen-panel-recovery\.spec\.ts|51-ai-chat\.spec\.ts|54-ai-mcp-chat\.spec\.ts/,
     },
     ...matrixProjects,
   ],

@@ -1,3 +1,5 @@
+#include "core/FeatureFlags.h"
+#if FASTBEE_ENABLE_AI || defined(UNIT_TEST)
 #include "network/handlers/AiRouteHandler.h"
 
 #include <new>
@@ -27,6 +29,7 @@ AiSessionIdentity requestOwner(WebHandlerContext* ctx, AsyncWebServerRequest* re
     AuthResult auth = ctx->authenticateRequest(request);
     SecurityConfig security = static_cast<AuthManager*>(ctx->authManager)->getSecurityConfig();
     String session = AuthManager::extractSessionIdFromRequest(request, security.cookieName);
+    if (session.isEmpty() && request->hasHeader("Authorization")) session = request->header("Authorization");
     return {auth.username + ":" + session};
 }
 const char* stateName(AiJobState state) {
@@ -46,6 +49,12 @@ void jobJson(const AiJobSnapshot& snapshot, JsonObject output) {
     output["error"] = snapshot.error;
     output["proposalId"] = snapshot.proposalId;
     output["iteration"] = snapshot.iteration;
+    if (snapshot.state == AiJobState::AWAITING_TOOL) {
+        JsonObject call = output["toolCall"].to<JsonObject>();
+        call["toolCallId"] = snapshot.toolCallId;
+        call["name"] = snapshot.toolName;
+        call["arguments"] = serialized(snapshot.toolArgumentsJson);
+    }
 }
 int submitStatus(const String& code) {
     if (code == "AI_JOB_ACTIVE") return 409;
@@ -186,7 +195,7 @@ void AiRouteHandler::handleJobSubmit(AsyncWebServerRequest* request) {
     if (!parseBody(request, input)) return;
     for (JsonPairConst field : input.as<JsonObjectConst>()) {
         const String key = field.key().c_str();
-        if (key != "message" && key != "clientSessionId" && key != "documentContext") {
+        if (key != "message" && key != "clientSessionId" && key != "documentContext" && key != "mcpEnabled") {
             ctx_->sendBadRequest(request, "AI_UNKNOWN_JOB_FIELD");
             return;
         }
@@ -195,7 +204,8 @@ void AiRouteHandler::handleJobSubmit(AsyncWebServerRequest* request) {
         (!input["clientSessionId"].isNull() && (!input["clientSessionId"].is<JsonString>() ||
          input["clientSessionId"].as<JsonString>().size() > 128)) ||
         (!input["documentContext"].isNull() && (!input["documentContext"].is<JsonString>() ||
-         input["documentContext"].as<JsonString>().size() > 12288))) {
+         input["documentContext"].as<JsonString>().size() > 12288)) ||
+        (!input["mcpEnabled"].isNull() && !input["mcpEnabled"].is<bool>())) {
         ctx_->sendBadRequest(request, "AI_INVALID_REQUEST");
         return;
     }
@@ -203,7 +213,7 @@ void AiRouteHandler::handleJobSubmit(AsyncWebServerRequest* request) {
     if (!manager) { ctx_->sendError(request, 503, "AI_NOT_ACTIVE"); return; }
     String jobId;
     auto result = manager->submit(requestOwner(ctx_, request), input["message"].as<const char*>(),
-                                  input["documentContext"] | "", jobId);
+                                  input["documentContext"] | "", jobId, input["mcpEnabled"] | false);
     if (!result.success) { ctx_->sendError(request, submitStatus(result.code), result.code); return; }
     JsonDocument response;
     response["success"] = true;
@@ -229,9 +239,12 @@ void AiRouteHandler::handleJobGet(AsyncWebServerRequest* request) {
 }
 
 void AiRouteHandler::handleJobCancel(AsyncWebServerRequest* request) {
+    const String path = request->url().substring(String("/api/ai/jobs/").length());
+    if (path.endsWith("/tool-result")) {
+        handleToolResult(request);
+        return;
+    }
     if (!admit(request)) return;
-    const String prefix = "/api/ai/jobs/";
-    String path = request->url().substring(prefix.length());
     if (!path.endsWith("/cancel")) { ctx_->sendBadRequest(request, "AI_INVALID_JOB_PATH"); return; }
     const String jobId = path.substring(0, path.length() - 7);
     AiConversationManager* manager = FastBeeFramework::getInstance()->getAiConversationManager();
@@ -241,6 +254,43 @@ void AiRouteHandler::handleJobCancel(AsyncWebServerRequest* request) {
     JsonDocument data;
     data["cancelRequested"] = true;
     data["stopped"] = false;
+    ctx_->sendSuccess(request, data);
+}
+
+void AiRouteHandler::handleToolResult(AsyncWebServerRequest* request) {
+    if (!admit(request)) return;
+    JsonDocument input;
+    if (!parseBody(request, input)) return;
+    for (JsonPairConst field : input.as<JsonObjectConst>()) {
+        const String key = field.key().c_str();
+        if (key != "toolCallId" && key != "result" && key != "error") {
+            ctx_->sendBadRequest(request, "AI_UNKNOWN_TOOL_RESULT_FIELD");
+            return;
+        }
+    }
+    if (!input["toolCallId"].is<JsonString>() || input["toolCallId"].as<JsonString>().size() > 128 ||
+        (!input["result"].isNull() && !input["result"].is<JsonString>()) ||
+        (!input["error"].isNull() && !input["error"].is<JsonString>()) ||
+        input["result"].as<JsonString>().size() > 16384 || input["error"].as<JsonString>().size() > 128) {
+        ctx_->sendBadRequest(request, "AI_INVALID_TOOL_RESULT");
+        return;
+    }
+    const String result = input["result"] | "";
+    const String error = input["error"] | "";
+    if (result.isEmpty() == error.isEmpty()) {
+        ctx_->sendBadRequest(request, "AI_INVALID_TOOL_RESULT");
+        return;
+    }
+    String path = request->url().substring(String("/api/ai/jobs/").length());
+    const String jobId = path.substring(0, path.length() - 12);
+    AiConversationManager* manager = FastBeeFramework::getInstance()->getAiConversationManager();
+    if (!manager || !manager->provideToolResult(requestOwner(ctx_, request), jobId,
+            input["toolCallId"].as<const char*>(), result, error)) {
+        ctx_->sendError(request, 409, "AI_STALE_TOOL_RESULT");
+        return;
+    }
+    JsonDocument data;
+    data["accepted"] = true;
     ctx_->sendSuccess(request, data);
 }
 
@@ -300,7 +350,10 @@ void AiRouteHandler::setupRoutes(AsyncWebServer* server) {
     server->on(AsyncURIMatcher::prefix("/api/ai/jobs/"), HTTP_GET,
         [this](AsyncWebServerRequest* request) { handleJobGet(request); });
     server->on(AsyncURIMatcher::prefix("/api/ai/jobs/"), HTTP_POST,
-        [this](AsyncWebServerRequest* request) { handleJobCancel(request); });
+        [this](AsyncWebServerRequest* request) { handleJobCancel(request); }, nullptr,
+        [this](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+            accumulateBody(request, data, len, index, total);
+        });
     server->on(AsyncURIMatcher::prefix("/api/ai/proposals/"), HTTP_POST,
         [this](AsyncWebServerRequest* request) { handleProposalExecute(request); }, nullptr,
         [this](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
@@ -309,3 +362,4 @@ void AiRouteHandler::setupRoutes(AsyncWebServer* server) {
     server->on(AsyncURIMatcher::exact("/api/ai/session"), HTTP_DELETE,
         [this](AsyncWebServerRequest* request) { handleSessionClear(request); });
 }
+#endif

@@ -1,3 +1,5 @@
+#include "core/FeatureFlags.h"
+#if FASTBEE_ENABLE_AI || defined(UNIT_TEST)
 #include "core/AiProposalService.h"
 
 #include <cstring>
@@ -119,3 +121,4 @@ void AiProposalService::clearOwner(const AiSessionIdentity& owner) {
         else ++it;
     }
 }
+#endif

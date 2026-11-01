@@ -89,7 +89,8 @@ const RUNTIME_DIRECT_MODULES = [
     'device-ota.js',
     'network.js',
     'feature-config.js',
-    'device-control.js'
+    'device-control.js',
+    'ai.js'
 ];
 const DIRECT_RUNTIME_MODULES = RUNTIME_DIRECT_MODULES.filter((fileName) => {
     if (fileName === 'device-control.js' && !hasDeviceControl(BUILD_CONTEXT)) return false;
@@ -148,6 +149,13 @@ const RUNTIME_BUNDLES = [
         subDir: 'device-control',
         order: ['modbus-ops.js', 'modbus-ctrl.js'],
         skipWithoutDC: true
+    },
+    {
+        outName: 'ai.js',
+        entry: 'ai.js',
+        subDir: null,
+        order: [],
+        siblings: ['../ai/ai-mcp-connector.js', '../ai/ai-mcp-documents.js', '../ai/ai-mcp-tools.js']
     },
     {
         outName: 'periph-exec.js',
@@ -349,7 +357,8 @@ function stripDivByClass(content, className) {
 // ---------------------------------------------------------------------------
 const RUNTIME_SUB_DIR_CAPABILITY_RULES = Object.freeze({
     protocol: Object.freeze({ anyOf: Object.freeze(['mqtt', 'modbus']) }),
-    'device-control': Object.freeze(['deviceControl'])
+    'device-control': Object.freeze(['deviceControl']),
+    ai: Object.freeze(['aiAssistant'])
 });
 
 let cssReferenceCorpusCache = null;

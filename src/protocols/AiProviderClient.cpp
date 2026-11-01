@@ -1,3 +1,5 @@
+#include "core/FeatureFlags.h"
+#if FASTBEE_ENABLE_AI || defined(UNIT_TEST)
 #include "protocols/AiProviderClient.h"
 
 #include <cstring>
@@ -90,6 +92,18 @@ bool AiProviderClient::buildRequest(const AiProviderRequest& request, JsonDocume
         : request.userMessage + "\n\n<untrusted_document_context>\n" + request.documentContext +
           "\n</untrusted_document_context>";
     if (!request.toolCallId.isEmpty()) {
+        if (request.toolName.isEmpty() || request.toolArgumentsJson.isEmpty() || request.toolResult.isEmpty()) {
+            error = "AI_INVALID_TOOL_RESULT";
+            return false;
+        }
+        JsonObject assistant = messages.add<JsonObject>();
+        assistant["role"] = "assistant";
+        assistant["content"] = nullptr;
+        JsonObject call = assistant["tool_calls"].to<JsonArray>().add<JsonObject>();
+        call["id"] = request.toolCallId;
+        call["type"] = "function";
+        call["function"]["name"] = request.toolName;
+        call["function"]["arguments"] = request.toolArgumentsJson;
         JsonObject result = messages.add<JsonObject>();
         result["role"] = "tool";
         result["tool_call_id"] = request.toolCallId;
@@ -277,3 +291,4 @@ AiProviderResult AiProviderClient::complete(const AiProviderRequest& request, Ai
     return result;
 #endif
 }
+#endif
