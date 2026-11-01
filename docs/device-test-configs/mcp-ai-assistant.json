@@ -1,0 +1,178 @@
+{
+  "schemaVersion": 1,
+  "preparedAt": "2026-11-02",
+  "fixtureId": "mcp-ai-assistant",
+  "purpose": "Authorized MCP AI assistant device acceptance input; this is a checklist, not a deployable configuration bundle.",
+  "deploymentAllowed": false,
+  "directImportAllowed": false,
+  "authorization": {
+    "explicitDeviceAuthorizationRequired": true,
+    "explicitOutputAuthorizationRequired": true,
+    "targetSelection": "Select the authorized device again for every run; historical ports and addresses are not identity evidence."
+  },
+  "deviceIdentity": {
+    "status": "PENDING_AUTHORIZED_DEVICE",
+    "mac": null,
+    "chip": null,
+    "environment": null,
+    "flashBytes": null,
+    "psramBytes": null,
+    "partitionLayoutSha256": null,
+    "activeOtaSlot": null,
+    "staAddress": null,
+    "verifyBeforeEveryRun": [
+      "mac",
+      "chip",
+      "flashBytes",
+      "psramBytes",
+      "partitionLayoutSha256",
+      "activeOtaSlot",
+      "staAddress"
+    ],
+    "note": "Environment names and allocator heap sizes do not prove physical Flash or PSRAM capacity."
+  },
+  "configurationPreservation": {
+    "status": "PENDING_FRESH_PRIVATE_BACKUP",
+    "freshSameDeviceBackupRequired": true,
+    "backupVerificationRequired": true,
+    "privateBackupOnly": true,
+    "preserve": [
+      "device identity and network settings",
+      "authentication and user settings",
+      "protocol settings and secret references",
+      "peripherals and peripheral execution rules",
+      "rule scripts and runtime feature choices",
+      "screen layout and point history",
+      "all unrelated non-Web files"
+    ],
+    "rollback": "Use only a verified backup from the same device after rechecking identity, partitions and active OTA slot; never replay an UNKNOWN write automatically."
+  },
+  "secretPolicy": {
+    "credentialsIncluded": false,
+    "rawSecretsAllowed": false,
+    "secretReferencesOnly": true,
+    "privateMaterialExcluded": true
+  },
+  "acceptanceLevels": {
+    "local": {
+      "status": "LOCAL_ONLY",
+      "boundary": "Host, mock, H2 and offline browser results are not device evidence."
+    },
+    "build": {
+      "status": "BUILD_ONLY",
+      "boundary": "Firmware, filesystem and artifact validation do not prove deployment or runtime behavior."
+    },
+    "deviceApi": {
+      "status": "PENDING_AUTHORIZED_DEVICE",
+      "requiredEvidence": "Current-device preflight, confirmation, apply, readback and matching runId/operationId records."
+    },
+    "physical": {
+      "status": "PENDING_AUTHORIZED_DEVICE_AND_OUTPUTS",
+      "requiredEvidence": "Measured sensor and Modbus values plus independently observed authorized output actions."
+    },
+    "longTerm": {
+      "status": "PENDING_8H_24H_72H",
+      "requiredWindowsHours": [
+        8,
+        24,
+        72
+      ],
+      "boundary": "Run normal load and fault injection separately; interrupted or shortened windows cannot pass."
+    }
+  },
+  "standardScenarios": [
+    {
+      "id": "gpio-sensor-peripheral",
+      "workflow": "document_to_peripheral",
+      "start": "Upload an authorized GPIO or sensor document and review its extracted facts.",
+      "requiredSteps": [
+        "typed draft",
+        "device preflight",
+        "human confirmation",
+        "idempotent apply",
+        "configuration readback",
+        "matching runId and operationId"
+      ],
+      "deviceApiStatus": "PENDING",
+      "physicalEvidence": "Compare an actual sensor reading with its source, timestamp and validity."
+    },
+    {
+      "id": "peripheral-execution-linkage",
+      "workflow": "configuration_review_apply",
+      "start": "Review a peripheral execution rule whose action references an existing device target.",
+      "requiredSteps": [
+        "target catalog validation",
+        "device preflight",
+        "human confirmation",
+        "idempotent apply",
+        "configuration readback",
+        "matching runId and operationId"
+      ],
+      "deviceApiStatus": "PENDING",
+      "physicalEvidence": "Observe the authorized output independently; an accepted command is not physical confirmation."
+    },
+    {
+      "id": "rule-script-mqtt-conversion",
+      "workflow": "configuration_review_apply",
+      "start": "Review a rule script with declared variables and explicit subscribe and publish topics.",
+      "requiredSteps": [
+        "script and topic validation",
+        "device preflight",
+        "human confirmation",
+        "idempotent apply",
+        "configuration readback",
+        "matching runId and operationId"
+      ],
+      "deviceApiStatus": "PENDING",
+      "physicalEvidence": "Verify real broker traffic and the resulting device behavior without evaluating scripts in the cloud."
+    },
+    {
+      "id": "pdf-excel-modbus-polling",
+      "workflow": "document_to_modbus",
+      "start": "Upload authorized PDF and Excel register documentation and review every extracted field.",
+      "requiredSteps": [
+        "document fact review",
+        "register address data type scale and interval validation",
+        "device preflight",
+        "human confirmation",
+        "idempotent apply",
+        "configuration readback",
+        "matching runId and operationId"
+      ],
+      "deviceApiStatus": "PENDING",
+      "physicalEvidence": "Read actual Modbus values and compare them with the reviewed register definition; injected document text remains untrusted data."
+    },
+    {
+      "id": "mqtt-topics-runtime-features",
+      "workflow": "mqtt_reporting_setup",
+      "start": "Review reporting topics, secret references and runtime feature choices together.",
+      "requiredSteps": [
+        "topic secret reference and resource validation",
+        "device preflight",
+        "human confirmation",
+        "idempotent apply",
+        "configuration readback",
+        "matching runId and operationId"
+      ],
+      "deviceApiStatus": "PENDING",
+      "physicalEvidence": "Verify the actual broker connection and reporting behavior while preserving existing credentials."
+    },
+    {
+      "id": "multi-section-conflict-recovery-rollback",
+      "workflow": "configuration_review_apply",
+      "start": "Apply reviewed multi-section changes, then exercise revision conflict, disconnect, UNKNOWN recovery and separately confirmed rollback.",
+      "requiredSteps": [
+        "baseline snapshot",
+        "device preflight",
+        "human confirmation",
+        "conflict and disconnect handling",
+        "read-only recovery query",
+        "readback",
+        "separate rollback confirmation",
+        "matching runId and operationId"
+      ],
+      "deviceApiStatus": "PENDING",
+      "physicalEvidence": "Confirm recovery and rollback on the same authorized device; UNKNOWN or expired writes must not replay automatically."
+    }
+  ]
+}
