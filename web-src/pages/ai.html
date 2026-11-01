@@ -1,0 +1,51 @@
+<div id="ai-page" class="page ai-page">
+    <style>
+        .ai-page{max-width:1080px;margin:0 auto}.ai-tabs{display:flex;gap:8px;margin-bottom:16px}.ai-panel{display:none}.ai-panel.ai-active{display:block}.ai-card{background:var(--bg-card,#fff);border:1px solid var(--border,#d9d9d9);border-radius:8px;padding:16px;margin-bottom:12px}.ai-messages{min-height:120px;max-height:420px;overflow:auto;margin-bottom:12px}.ai-message{padding:8px;border-bottom:1px solid var(--border,#eee);white-space:pre-wrap;word-break:break-word}.ai-form-row{display:flex;gap:8px;margin:10px 0}.ai-form-row input,.ai-form-row textarea,.ai-config-field{flex:1;min-width:0;padding:8px;border:1px solid var(--border,#d9d9d9);border-radius:6px;box-sizing:border-box}.ai-config-label{display:block;margin:10px 0 4px}.ai-config-input{width:100%;padding:8px;border:1px solid var(--border,#d9d9d9);border-radius:6px;box-sizing:border-box}.ai-status{font-size:13px;color:var(--text-secondary,#666);margin:8px 0}.ai-error{color:#cf1322}.ai-result-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;font-size:13px}.ai-issue{width:100%;min-height:130px;box-sizing:border-box}.ai-hidden{display:none!important}@media(max-width:480px){.ai-card{padding:12px}.ai-form-row{flex-direction:column}.ai-result-grid{grid-template-columns:1fr}.ai-tabs{position:sticky;top:0;background:var(--bg-body,#f5f5f5);z-index:2}}
+    </style>
+    <div class="ai-tabs" role="tablist" aria-label="AI 助手">
+        <button type="button" class="fb-btn fb-btn-primary" data-ai-tab="chat" role="tab" aria-selected="true">AI 对话</button>
+        <button type="button" class="fb-btn" data-ai-tab="config" role="tab" aria-selected="false">连接配置</button>
+    </div>
+    <section id="ai-chat-panel" class="ai-panel ai-active" role="tabpanel">
+        <div class="ai-card">
+            <div id="ai-feature-hint" class="ai-status ai-hidden">请先到功能配置启用 AI 助手。</div>
+            <div id="ai-messages" class="ai-messages" aria-live="polite"></div>
+            <div id="ai-proposal" class="ai-card ai-hidden">
+                <p id="ai-proposal-summary"></p>
+                <p class="ai-status">尚未写入设备。确认后将执行资源预检；保存、回读和实物状态分别报告。</p>
+                <button id="ai-confirm-proposal" type="button" class="fb-btn fb-btn-primary">确认执行</button>
+            </div>
+            <div id="ai-execution-result" class="ai-result-grid ai-hidden" aria-live="polite"></div>
+            <div class="ai-form-row">
+                <textarea id="ai-message" rows="3" maxlength="2000" placeholder="例如：在 GPIO4 添加一个继电器"></textarea>
+                <button id="ai-send" type="button" class="fb-btn fb-btn-primary">发送</button>
+            </div>
+            <div class="ai-form-row">
+                <input id="ai-document-file" type="file" accept=".pdf,.doc,.docx,.png,.jpg,.jpeg" disabled>
+                <button id="ai-document-upload" type="button" class="fb-btn" disabled>配置 MCP 后可用</button>
+                <button id="ai-cancel" type="button" class="fb-btn" disabled>取消</button>
+            </div>
+            <div id="ai-chat-status" class="ai-status" role="status"></div>
+        </div>
+        <button id="ai-issue-draft" type="button" class="fb-btn">生成脱敏 Issue 草稿</button>
+        <textarea id="ai-issue-preview" class="ai-issue ai-hidden" readonly></textarea>
+    </section>
+    <section id="ai-config-panel" class="ai-panel" role="tabpanel">
+        <form id="ai-provider-form" class="ai-card">
+            <h3>本地模型连接</h3>
+            <button id="ai-deepseek-preset" type="button" class="fb-btn">使用 DeepSeek 预设</button>
+            <input id="ai-base-url" class="ai-config-input" type="url" aria-label="OpenAI 兼容 HTTPS 地址" placeholder="OpenAI 兼容 HTTPS 地址" required>
+            <input id="ai-model" class="ai-config-input" type="text" maxlength="64" aria-label="模型" placeholder="模型" required>
+            <input id="ai-api-key" class="ai-config-input" type="password" maxlength="256" aria-label="API Key（留空保留原值）" placeholder="API Key（留空保留原值）" autocomplete="new-password">
+            <label><input id="ai-clear-key" type="checkbox"> 清除已保存 Key</label>
+            <div class="ai-form-row"><button id="ai-save-provider" type="submit" class="fb-btn fb-btn-primary">保存本地模型配置</button></div>
+        </form>
+        <form id="ai-mcp-form" class="ai-card">
+            <h3>可选 MCP 文档与工具</h3>
+            <p class="ai-status">留空即可独立使用本地模型对话和配置草案。配对令牌仅保存在浏览器会话中。</p>
+            <input id="ai-mcp-url" class="ai-config-input" type="url" aria-label="MCP 云端 HTTPS 地址" placeholder="MCP 云端 HTTPS 地址">
+            <div class="ai-form-row"><button id="ai-save-mcp" type="submit" class="fb-btn">保存 MCP 地址</button></div>
+        </form>
+        <div id="ai-config-status" class="ai-status" role="status"></div>
+    </section>
+</div>

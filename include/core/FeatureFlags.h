@@ -11,6 +11,10 @@
 #ifndef FEATURE_FLAGS_H
 #define FEATURE_FLAGS_H
 
+#ifndef FASTBEE_ENABLE_AI
+#define FASTBEE_ENABLE_AI 0
+#endif
+
 // Device screens are supported on ESP32-S3. Host tests retain the generic
 // model; production targets explicitly set these capabilities in platformio.ini.
 // Runtime enablement is independent: buffers are allocated only when enabled.

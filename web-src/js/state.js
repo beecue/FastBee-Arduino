@@ -30,7 +30,8 @@ var AppState = typeof AppState !== 'undefined' ? AppState : {
         'logs-page': 'logs',
         'users-page': 'admin',
         'rule-script-page': 'rule-script',
-        'features-page': 'features'
+        'features-page': 'features',
+        'ai-page': 'ai'
     },
 
     // ============ 委托给 PageLoader ============
@@ -513,7 +514,8 @@ var AppState = typeof AppState !== 'undefined' ? AppState : {
             logs: 'logs',
             users: 'users',
             'rule-script': 'rule-script',
-            features: 'feature-config'
+            features: 'feature-config',
+            ai: 'ai'
         };
     },
 
@@ -547,6 +549,7 @@ var AppState = typeof AppState !== 'undefined' ? AppState : {
             users: () => { this.loadUsers({ noCache: true }); },
             'rule-script': () => { this.loadRuleScriptPage({ noCache: true }); },
             features: () => { this.loadFeaturesPage(); },
+            ai: () => { this.loadAiPage(); },
             'device-control': () => {
                 if (typeof this.loadDeviceControlPage === 'function') {
                     this.loadDeviceControlPage();
@@ -704,7 +707,8 @@ var AppState = typeof AppState !== 'undefined' ? AppState : {
         deviceControl: 'device-control',   // 设备大屏
         screenPanel: 'screen-panel',       // 运行降级或缺屏时仍按用户启用意图保留入口
         logViewer: 'logs',                 // 设备日志
-        userAdmin: 'users'                 // 用户管理
+        userAdmin: 'users',                // 用户管理
+        aiAssistant: 'ai'
     },
 
     // 最近一次功能菜单状态缓存（key → active）

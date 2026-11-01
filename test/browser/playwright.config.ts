@@ -67,7 +67,7 @@ export default defineConfig({
   projects: [
     {
       name: 'mcp',
-      testMatch: /52-ai-mcp-connector|53-mcp-config-lifecycle/,
+      testMatch: /51-ai-chat|52-ai-mcp-connector|53-mcp-config-lifecycle/,
       use: { ...devices['Desktop Chrome'] },
     },
 

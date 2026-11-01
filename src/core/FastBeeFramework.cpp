@@ -14,6 +14,9 @@
 #include "core/MemoryBudget.h"
 #include "core/FeatureBudget.h"
 #include "core/RuntimeFeatureManager.h"
+#if FASTBEE_ENABLE_AI
+#include "core/AiConversationManager.h"
+#endif
 #if FASTBEE_ENABLE_SCREEN_PANEL
 #include "core/ScreenPanelManager.h"
 #endif
@@ -87,6 +90,28 @@
 // 启动时按 DRAM 需求从大到小校验，内存不足的功能自动降级为 disabled。
 // ============================================================================
 namespace {
+
+#if FASTBEE_ENABLE_AI
+struct AiRuntime {
+    AiProviderClient provider;
+    AiProposalService proposals;
+    AiConversationManager conversation;
+    AiRuntime() : conversation(provider, proposals) {}
+};
+std::unique_ptr<AiRuntime> aiRuntime;
+
+void syncAiFeature() {
+    const bool enabled = FastBee::RuntimeFeatureManager::instance().shouldEnable("aiAssistant");
+    if (enabled && !aiRuntime) {
+        std::unique_ptr<AiRuntime> candidate(new (std::nothrow) AiRuntime());
+        String error;
+        if (candidate && candidate->conversation.start(error)) aiRuntime = std::move(candidate);
+    } else if (!enabled && aiRuntime) {
+        aiRuntime->conversation.stop();
+        if (!aiRuntime->conversation.isWorkerActive()) aiRuntime.reset();
+    }
+}
+#endif
 
 // 检查顺序按 DRAM 需求从大到小，确保重型功能优先获得内存
 const FastBee::FeatureBudget kFeatureBudgets[] = {
@@ -573,6 +598,9 @@ bool FastBeeFramework::initialize() {
     FastBee::RuntimeFeatureManager::instance().setNetworkReady(true);
     // 重试因门控在早期被跳过的 eager 外设（如 IR 接收头），惰性外设无需处理
     PeripheralManager::getInstance().retryDeferredPeripherals();
+#if FASTBEE_ENABLE_AI
+    syncAiFeature();
+#endif
 
 #if FASTBEE_ENABLE_BLE
     // 步骤7.6: BLE 配网器仅在编译能力和运行开关同时开启时创建。
@@ -1773,6 +1801,10 @@ void FastBeeFramework::run() {
         }
     }
 
+#if FASTBEE_ENABLE_AI
+    syncAiFeature();
+#endif
+
     // 执行任务调度
     if (taskManager) {
         taskManager->run();
@@ -1888,6 +1920,13 @@ void FastBeeFramework::shutdown() {
     }
 #endif
 
+#if FASTBEE_ENABLE_AI
+    if (aiRuntime) {
+        aiRuntime->conversation.stop();
+        if (!aiRuntime->conversation.isWorkerActive()) aiRuntime.reset();
+    }
+#endif
+
     // 按依赖顺序反向关闭各子系统
     if (taskManager) {
         taskManager->stopAllTasks();
@@ -1941,6 +1980,13 @@ UserManager* FastBeeFramework::getUserManager() const { return userManager.get()
 AuthManager* FastBeeFramework::getAuthManager() const { return authManager.get(); }
 
 ProtocolManager* FastBeeFramework::getProtocolManager() const { return protocolManager.get(); }
+AiConversationManager* FastBeeFramework::getAiConversationManager() const {
+#if FASTBEE_ENABLE_AI
+    return aiRuntime ? &aiRuntime->conversation : nullptr;
+#else
+    return nullptr;
+#endif
+}
 
 // 检查系统是否已初始化
 bool FastBeeFramework::isInitialized() const {

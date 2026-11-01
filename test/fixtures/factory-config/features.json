@@ -26,6 +26,7 @@
     "logViewer": { "enabled": false },
     "fileLogging": { "enabled": false },
     "userAdmin": { "enabled": false },
+    "aiAssistant": { "enabled": false },
     "ble": { "enabled": false },
     "ethernet": { "enabled": false },
     "cellular": { "enabled": false }

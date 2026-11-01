@@ -213,6 +213,10 @@ void RuntimeFeatureManager::generateDefaults() {
                      FASTBEE_ENABLE_USER_ADMIN != 0, false,
                      nullptr, nullptr, 0});
 
+    registerFeature({"aiAssistant", "AI 助手", "system", 180, 16384,
+                     FASTBEE_ENABLE_AI != 0, false,
+                     "Single bounded provider worker; 8KB stack and PSRAM response buffers", nullptr, 46, true});
+
     // ═══ D 类：网络扩展（出厂默认禁用，以太网/4G 需按硬件配置手动启用）═══
     registerFeature({"ble", "BLE Bluetooth", "network", 80, 10240,
                      FASTBEE_ENABLE_BLE != 0, false,

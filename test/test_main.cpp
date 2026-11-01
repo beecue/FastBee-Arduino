@@ -70,6 +70,10 @@ extern void test_screen_panel_manager_group();
 extern void test_feature_budget_group();
 extern void test_network_config_additional_group();  // Added: LittleFS & network.json config tests
 extern void test_mcp_config_apply_group();
+extern void test_ai_config_group();
+extern void test_ai_provider_group();
+extern void test_ai_proposal_group();
+extern void test_ai_conversation_group();
 
 // Phase A→D 新功能测试组：对应的 test_fragmentation_aware_scheduler.cpp /
 // test_tls_memory_pool.cpp / test_feature_toggle.cpp / test_memory_profile_db.cpp
@@ -288,6 +292,12 @@ void setup() {
 
     Serial.println("\n[TEST] Running MCP Managed Configuration Tests...");
     test_mcp_config_apply_group();
+
+    Serial.println("\n[TEST] Running Local AI Baseline Tests...");
+    test_ai_config_group();
+    test_ai_provider_group();
+    test_ai_proposal_group();
+    test_ai_conversation_group();
 
     // Phase A→D 新功能测试：源文件缺失，暂不调用（见上方 extern 说明）
 

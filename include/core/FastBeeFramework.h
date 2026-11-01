@@ -24,6 +24,7 @@ class HealthMonitor;
 class UserManager;
 class AuthManager;
 class ProtocolManager;
+class AiConversationManager;
 class SystemHealth;
 #if FASTBEE_ENABLE_BLE
 class BLEProvisioner;
@@ -102,6 +103,7 @@ public:
     UserManager* getUserManager() const;
     AuthManager* getAuthManager() const;
     ProtocolManager* getProtocolManager() const;
+    AiConversationManager* getAiConversationManager() const;
     
     /**
      * @brief 检测并回填设备身份标识（deviceId 和 MQTT clientId）
