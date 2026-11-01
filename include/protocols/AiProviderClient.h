@@ -66,6 +66,7 @@ public:
                               AiProviderReply& reply, String& error);
     static String completionUrl(const AiConfig& config);
     static String safeError(AiProviderError error);
+    static bool terminalAllowed(uint32_t deadlineAtMs, const std::atomic<bool>* cancelRequested);
     static bool pumpWait(int available, size_t total, int length, uint32_t deadlineAtMs,
                          const std::atomic<bool>* cancelRequested);
     static AiHttpReadStatus readResponse(AiProviderStream& stream, int contentLength,

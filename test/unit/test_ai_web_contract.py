@@ -82,6 +82,15 @@ class AiWebContractTests(unittest.TestCase):
             self.assertIn("releaseBody(request);", admit)
         self.assertIn("return allowed;", admit)
 
+    def test_native_socket_link_flag_is_windows_only(self):
+        ini = (ROOT / "platformio.ini").read_text(encoding="utf-8")
+        native = ini.split("[env:native]", 1)[1]
+        self.assertNotIn("-lws2_32", native)
+        self.assertIn("native-host-link-flags.py", native)
+        script = (ROOT / "scripts/native-host-link-flags.py").read_text(encoding="utf-8")
+        self.assertIn('platform.system() == "Windows"', script)
+        self.assertIn('LIBS', script)
+
 
 if __name__ == "__main__":
     unittest.main()

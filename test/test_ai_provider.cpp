@@ -81,18 +81,21 @@ std::string receiveActualHttp(const std::string& response) {
 
 class BufferedStream : public AiProviderStream {
 public:
-    explicit BufferedStream(std::string data) : data_(std::move(data)) {}
+    explicit BufferedStream(std::string data, std::atomic<bool>* cancelAfterRead = nullptr)
+        : data_(std::move(data)), cancelAfterRead_(cancelAfterRead) {}
     int available() override { return static_cast<int>(data_.size() - position_); }
     size_t readBytes(uint8_t* data, size_t length) override {
         const size_t count = std::min(length, data_.size() - position_);
         if (count) std::memcpy(data, data_.data() + position_, count);
         position_ += count;
+        if (cancelAfterRead_ && position_ >= data_.size()) cancelAfterRead_->store(true);
         return count;
     }
     bool connected() override { return position_ < data_.size(); }
 private:
     std::string data_;
     size_t position_ = 0;
+    std::atomic<bool>* cancelAfterRead_;
 };
 
 std::vector<String> localTools() {
@@ -213,6 +216,34 @@ void test_actual_http_chunked_clean_eof_completes() {
     TEST_ASSERT_EQUAL_STRING(payload.c_str(), response.c_str());
 }
 
+void test_cancellation_after_post_and_final_read_is_terminal() {
+    std::atomic<bool> cancelled{false};
+    const std::string payload = "{}";
+    BufferedStream identity(payload, &cancelled);
+    String response;
+    TEST_ASSERT_EQUAL(static_cast<int>(AiHttpReadStatus::TIMEOUT),
+        static_cast<int>(AiProviderClient::readResponse(identity, -1, millis() + 1000, &cancelled, response)));
+    cancelled = false;
+    BufferedStream chunked("2\r\n{}\r\n0\r\n\r\n", &cancelled);
+    response = "";
+    TEST_ASSERT_EQUAL(static_cast<int>(AiHttpReadStatus::TIMEOUT),
+        static_cast<int>(AiProviderClient::readResponse(chunked, -1, millis() + 1000, &cancelled, response, true)));
+}
+
+void test_malformed_and_truncated_chunks_are_rejected() {
+    const char* malformed[] = {"4x\r\n", "4 \r\n", "4\n", "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\r\n", "4\r\nok\rX\r\n"};
+    for (const char* raw : malformed) {
+        BufferedStream stream(raw);
+        String response;
+        TEST_ASSERT_EQUAL(static_cast<int>(AiHttpReadStatus::IO_ERROR),
+            static_cast<int>(AiProviderClient::readResponse(stream, -1, millis() + 1000, nullptr, response, true)));
+    }
+    BufferedStream truncated("10\r\nabc");
+    String response;
+    TEST_ASSERT_EQUAL(static_cast<int>(AiHttpReadStatus::IO_ERROR),
+        static_cast<int>(AiProviderClient::readResponse(truncated, -1, millis() + 1000, nullptr, response, true)));
+}
+
 } // namespace
 
 void test_ai_provider_group() {
@@ -225,4 +256,6 @@ void test_ai_provider_group() {
     RUN_TEST(test_available_data_also_honors_deadline);
     RUN_TEST(test_actual_http_unknown_length_clean_eof_completes);
     RUN_TEST(test_actual_http_chunked_clean_eof_completes);
+    RUN_TEST(test_cancellation_after_post_and_final_read_is_terminal);
+    RUN_TEST(test_malformed_and_truncated_chunks_are_rejected);
 }

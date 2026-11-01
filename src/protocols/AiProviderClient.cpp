@@ -2,6 +2,8 @@
 #if FASTBEE_ENABLE_AI || defined(UNIT_TEST)
 #include "protocols/AiProviderClient.h"
 
+#include <cerrno>
+#include <cstdlib>
 #include <cstring>
 
 #ifndef UNIT_TEST
@@ -54,11 +56,15 @@ void addTool(JsonArray tools, const char* name, const char* description, bool ac
 }
 }
 
-bool AiProviderClient::pumpWait(int available, size_t total, int length, uint32_t deadlineAtMs,
-                                const std::atomic<bool>* cancelRequested) {
+bool AiProviderClient::terminalAllowed(uint32_t deadlineAtMs, const std::atomic<bool>* cancelRequested) {
     if (cancelRequested && cancelRequested->load()) return false;
     const uint32_t now = static_cast<uint32_t>(millis());
-    if (deadlineAtMs && static_cast<int32_t>(deadlineAtMs - now) <= 0) return false;
+    return !deadlineAtMs || static_cast<int32_t>(deadlineAtMs - now) > 0;
+}
+
+bool AiProviderClient::pumpWait(int available, size_t total, int length, uint32_t deadlineAtMs,
+                                const std::atomic<bool>* cancelRequested) {
+    if (!terminalAllowed(deadlineAtMs, cancelRequested)) return false;
     if (available > 0 || (length >= 0 && total >= static_cast<size_t>(length))) return true;
     delay(1);
     return true;
@@ -67,23 +73,39 @@ bool AiProviderClient::pumpWait(int available, size_t total, int length, uint32_
 AiHttpReadStatus AiProviderClient::readResponse(AiProviderStream& stream, int contentLength,
         uint32_t deadlineAtMs, const std::atomic<bool>* cancelRequested, String& response, bool chunked) {
     response.clear();
+    auto finish = [&](AiHttpReadStatus status) {
+        return terminalAllowed(deadlineAtMs, cancelRequested) ? status : AiHttpReadStatus::TIMEOUT;
+    };
     enum class ChunkState : uint8_t { SIZE, DATA, DATA_END, TRAILER, DONE };
     ChunkState chunkState = ChunkState::SIZE;
     String chunkLine;
     size_t chunkRemaining = 0;
+    bool carriage = false;
     auto consume = [&](uint8_t value) -> bool {
         switch (chunkState) {
             case ChunkState::SIZE:
+                if (value == '\r') {
+                    if (carriage) return false;
+                    carriage = true;
+                    return true;
+                }
                 if (value == '\n') {
+                    if (!carriage) return false;
+                    carriage = false;
                     const int extension = chunkLine.indexOf(';');
                     const String sizeText = extension >= 0 ? chunkLine.substring(0, extension) : chunkLine;
-                    chunkRemaining = static_cast<size_t>(strtoul(sizeText.c_str(), nullptr, 16));
+                    if (sizeText.isEmpty()) return false;
+                    errno = 0;
+                    char* end = nullptr;
+                    const unsigned long parsed = strtoul(sizeText.c_str(), &end, 16);
+                    if (errno == ERANGE || end != sizeText.c_str() + sizeText.length()) return false;
+                    chunkRemaining = static_cast<size_t>(parsed);
                     chunkLine = "";
                     chunkState = chunkRemaining == 0 ? ChunkState::TRAILER : ChunkState::DATA;
-                } else if (value != '\r') {
-                    if (chunkLine.length() >= 24) return false;
-                    chunkLine.concat(static_cast<char>(value));
+                    return true;
                 }
+                if (carriage || chunkLine.length() >= 24) return false;
+                chunkLine.concat(static_cast<char>(value));
                 return true;
             case ChunkState::DATA:
                 if (chunkRemaining == 0) return false;
@@ -91,11 +113,31 @@ AiHttpReadStatus AiProviderClient::readResponse(AiProviderStream& stream, int co
                 if (--chunkRemaining == 0) chunkState = ChunkState::DATA_END;
                 return true;
             case ChunkState::DATA_END:
-                if (value == '\n') chunkState = ChunkState::SIZE;
-                return true;
+                if (value == '\r') {
+                    if (carriage) return false;
+                    carriage = true;
+                    return true;
+                }
+                if (value == '\n') {
+                    if (!carriage) return false;
+                    carriage = false;
+                    chunkState = ChunkState::SIZE;
+                    return true;
+                }
+                return false;
             case ChunkState::TRAILER:
-                if (value == '\n') chunkState = ChunkState::DONE;
-                return true;
+                if (value == '\r') {
+                    if (carriage) return false;
+                    carriage = true;
+                    return true;
+                }
+                if (value == '\n') {
+                    if (!carriage) return false;
+                    carriage = false;
+                    chunkState = ChunkState::DONE;
+                    return true;
+                }
+                return false;
             default:
                 return true;
         }
@@ -103,30 +145,31 @@ AiHttpReadStatus AiProviderClient::readResponse(AiProviderStream& stream, int co
     uint8_t buffer[512];
     while (response.length() < kMaxResponseBytes + 1) {
         const int available = stream.available();
-        if (chunked && chunkState == ChunkState::DONE) return AiHttpReadStatus::COMPLETE;
+        if (chunked && chunkState == ChunkState::DONE) return finish(AiHttpReadStatus::COMPLETE);
         if (available <= 0 && contentLength < 0 && !stream.connected()) {
-            return chunked && chunkState != ChunkState::DONE ? AiHttpReadStatus::IO_ERROR : AiHttpReadStatus::COMPLETE;
+            return finish(chunked && chunkState != ChunkState::DONE ? AiHttpReadStatus::IO_ERROR : AiHttpReadStatus::COMPLETE);
         }
         if (!pumpWait(available, response.length(), contentLength, deadlineAtMs, cancelRequested)) {
             return AiHttpReadStatus::TIMEOUT;
         }
         if (!chunked && contentLength >= 0 && response.length() >= static_cast<size_t>(contentLength)) {
-            return AiHttpReadStatus::COMPLETE;
+            return finish(AiHttpReadStatus::COMPLETE);
         }
         if (available > 0) {
             const size_t wanted = available > static_cast<int>(sizeof(buffer)) ? sizeof(buffer) : available;
             const size_t got = stream.readBytes(buffer, wanted);
-            if (!got) return stream.connected() ? AiHttpReadStatus::IO_ERROR : AiHttpReadStatus::COMPLETE;
+            if (!terminalAllowed(deadlineAtMs, cancelRequested)) return AiHttpReadStatus::TIMEOUT;
+            if (!got) return finish(stream.connected() ? AiHttpReadStatus::IO_ERROR : AiHttpReadStatus::COMPLETE);
             if (chunked) {
                 for (size_t i = 0; i < got; ++i) {
-                    if (!consume(buffer[i])) return AiHttpReadStatus::IO_ERROR;
+                    if (!consume(buffer[i])) return finish(AiHttpReadStatus::IO_ERROR);
                 }
             } else {
                 response.concat(reinterpret_cast<const char*>(buffer), got);
             }
         }
     }
-    return AiHttpReadStatus::TOO_LARGE;
+    return finish(AiHttpReadStatus::TOO_LARGE);
 }
 
 String AiProviderClient::safeError(AiProviderError error) {
@@ -308,6 +351,7 @@ AiProviderResult AiProviderClient::complete(const AiProviderRequest& request, Ai
 #else
     const uint32_t deadlineAtMs = request.deadlineAtMs ? request.deadlineAtMs : millis() + 20000UL;
     auto remaining = [&]() -> uint32_t {
+        if (!terminalAllowed(deadlineAtMs, request.cancelRequested)) return 0;
         const int32_t left = static_cast<int32_t>(deadlineAtMs - millis());
         return left > 0 ? static_cast<uint32_t>(left) : 0;
     };
