@@ -13,7 +13,7 @@ JsonDocument arguments(const char* json) {
     return doc;
 }
 
-void test_gpio_and_dht_proposals_require_confirmation() {
+void test_gpio_is_rejected_and_dht_proposal_requires_confirmation() {
     AiProposalService service;
     int executions = 0;
     service.setExecutor([&](const AiProposal&, String&) {
@@ -26,8 +26,14 @@ void test_gpio_and_dht_proposals_require_confirmation() {
         result.physicalConfirmed = false;
         return result;
     });
-    auto args = arguments("{\"name\":\"继电器\",\"pin\":4,\"activeHigh\":true}");
-    auto created = service.createFromTool({"session-a"}, "create_gpio_output", args.as<JsonVariantConst>(), 7, 1000);
+    auto gpio = service.createFromTool({"session-a"}, "create_gpio_output",
+        arguments("{\"name\":\"继电器\",\"pin\":4,\"activeHigh\":true}").as<JsonVariantConst>(), 7, 1000);
+    TEST_ASSERT_FALSE(gpio.success);
+    TEST_ASSERT_EQUAL_STRING("AI_UNSUPPORTED_TOOL", gpio.code.c_str());
+    TEST_ASSERT_EQUAL(0, executions);
+
+    auto created = service.createFromTool({"session-a"}, "create_dht_sensor",
+        arguments("{\"name\":\"温湿度\",\"pin\":5}").as<JsonVariantConst>(), 7, 1000);
     TEST_ASSERT_TRUE(created.success);
     TEST_ASSERT_EQUAL(0, executions);
     TEST_ASSERT_TRUE(created.proposalId.length() > 12);
@@ -47,10 +53,6 @@ void test_gpio_and_dht_proposals_require_confirmation() {
     auto replay = service.execute({"session-a"}, created.proposalId, "确认执行", 7, 1002);
     TEST_ASSERT_EQUAL_STRING("AI_PROPOSAL_ALREADY_USED", replay.code.c_str());
     TEST_ASSERT_EQUAL(1, executions);
-
-    auto dht = service.createFromTool({"session-a"}, "create_dht_sensor",
-        arguments("{\"name\":\"温湿度\",\"pin\":5}").as<JsonVariantConst>(), 7, 1002);
-    TEST_ASSERT_TRUE(dht.success);
 }
 
 void test_invalid_arguments_and_injected_runtime_fields_fail_closed() {
@@ -61,7 +63,7 @@ void test_invalid_arguments_and_injected_runtime_fields_fail_closed() {
         "{\"name\":\"x\",\"pin\":4,\"initialState\":1}"
     };
     for (const char* json : invalid) {
-        auto created = service.createFromTool({"s"}, "create_gpio_output",
+        auto created = service.createFromTool({"s"}, "create_dht_sensor",
             arguments(json).as<JsonVariantConst>(), 1, 0);
         TEST_ASSERT_FALSE(created.success);
         TEST_ASSERT_EQUAL_STRING("AI_INVALID_TOOL_ARGUMENTS", created.code.c_str());
@@ -96,7 +98,7 @@ void test_expiry_wraparound_and_execution_failure_states() {
 } // namespace
 
 void test_ai_proposal_group() {
-    RUN_TEST(test_gpio_and_dht_proposals_require_confirmation);
+    RUN_TEST(test_gpio_is_rejected_and_dht_proposal_requires_confirmation);
     RUN_TEST(test_invalid_arguments_and_injected_runtime_fields_fail_closed);
     RUN_TEST(test_expiry_wraparound_and_execution_failure_states);
 }

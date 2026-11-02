@@ -23,6 +23,8 @@
     var HEARTBEAT_INTERVAL_MS = 60000;
     var POLL_RETRY_BASE_MS = 2000;
     var POLL_RETRY_MAX_MS = 30000;
+    var REFRESH_RETRY_BASE_MS = 2000;
+    var REFRESH_RETRY_MAX_MS = 30000;
     // 连续失败上限：达到后停机并上报最后状态，失效会话不得无限轮询/心跳
     var MAX_CONSECUTIVE_FAILURES = 10;
 
@@ -52,26 +54,25 @@
     var capTimer = null;
     var retryTimer = null;
     var consecutiveErrors = 0;
+    var refreshFailures = 0;
     var lastState = 'online';
 
     // ---------- 设备同源只读调用（页面现有认证，不引入新凭据） ----------
 
     function _deviceGet(path) {
+        function unwrap(resp) {
+            if (path.indexOf('/api/mcp/config/') === 0) return _unwrapManaged(path, resp);
+            if (!resp || resp.success !== true) throw new Error('DEVICE_API_FAILED');
+            return resp.data;
+        }
         if (typeof window.apiGet === 'function') {
-            return Promise.resolve(window.apiGet(path)).then(function (resp) {
-                if (!resp || resp.success !== true) {
-                    throw new Error('DEVICE_API_FAILED');
-                }
-                return resp.data;
-            });
+            return Promise.resolve(window.apiGet(path)).then(unwrap);
         }
         return window.fetch(path, { credentials: 'same-origin' }).then(function (resp) {
             return resp.json().then(function (body) {
-                if (!resp.ok || !body || body.success !== true) {
-                    throw new Error('DEVICE_API_FAILED');
-                }
-                return body.data;
-            });
+                if (!resp.ok && path.indexOf('/api/mcp/config/') !== 0) throw new Error('DEVICE_API_FAILED');
+                return unwrap(body);
+            }, function () { throw new Error('DEVICE_API_FAILED'); });
         });
     }
 
@@ -100,12 +101,20 @@
     }
 
     function _validOperationState(state) {
-        return ['SUCCEEDED', 'FAILED', 'UNKNOWN', 'ROLLED_BACK'].indexOf(state) >= 0;
+        return ['SUCCEEDED', 'FAILED', 'UNKNOWN', 'ROLLED_BACK', 'PARTIAL_APPLY', 'PARTIAL_ROLLBACK',
+            'APPLYING', 'ROLLING_BACK'].indexOf(state) >= 0;
+    }
+
+    function _validStepState(state) {
+        return ['PENDING', 'SUCCEEDED', 'FAILED', 'UNKNOWN', 'ROLLED_BACK', 'APPLYING', 'ROLLING_BACK'].indexOf(state) >= 0;
     }
 
     function _validManagedResult(path, data) {
         if (!_isObject(data)) return false;
         if (path === '/api/mcp/config/preflight') return typeof data.allowed === 'boolean';
+        if (path === '/api/mcp/config/snapshot') {
+            return typeof data.revision === 'string' && data.revision.length > 0 && _isObject(data.sections);
+        }
         if (path === '/api/mcp/mqtt/test') {
             // 启动响应：显式 started 标记 + 合法测试 ID；绝不接受无 ID 的"已启动"
             return data.started === true && typeof data.testId === 'string'
@@ -119,7 +128,7 @@
             for (var i = 0; i < data.steps.length; i++) {
                 var step = data.steps[i];
                 if (!_isObject(step) || typeof step.section !== 'string' || !step.section
-                        || !_validOperationState(step.state)) return false;
+                        || !_validStepState(step.state)) return false;
                 var flags = ['accepted', 'persisted', 'readback', 'observed', 'physicalConfirmed', 'pendingRestart'];
                 for (var j = 0; j < flags.length; j++) {
                     if (step[flags[j]] !== undefined && typeof step[flags[j]] !== 'boolean') return false;
@@ -134,28 +143,37 @@
             'PREFLIGHT_FAILED', 'CONFIRMATION_REQUIRED', 'CONFIRMATION_EXPIRED', 'SECRET_REQUIRED', 'DRAFT_CONFLICT',
             'DRAFT_NOT_FOUND', 'DEVICE_NOT_FOUND', 'DEVICE_IDENTITY_CONFLICT', 'OPERATION_IN_PROGRESS', 'QUOTA_EXCEEDED',
             'MANUAL_RECOVERY_REQUIRED', 'IDEMPOTENCY_CONFLICT', 'IDEMPOTENCY_KEY_CONFLICT', 'AUDIT_UNAVAILABLE',
-            'FORBIDDEN', 'UNAUTHENTICATED', 'SAVE_FAILED', 'PERSIST_FAILED'].indexOf(code) >= 0;
+            'FORBIDDEN', 'UNAUTHENTICATED', 'SAVE_FAILED', 'PERSIST_FAILED', 'PARTIAL_APPLY', 'PARTIAL_ROLLBACK'].indexOf(code) >= 0;
+    }
+
+    function _unwrapManaged(path, resp) {
+        if (!_isObject(resp)) throw new Error('OUTCOME_UNKNOWN');
+        var managedConfig = path.indexOf('/api/mcp/config/') === 0;
+        if (resp.success === true) {
+            var data = managedConfig ? resp : resp.data;
+            if (!_validManagedResult(path, data)) throw new Error('OUTCOME_UNKNOWN');
+            return data;
+        }
+        if (managedConfig && resp.success === false && _validManagedResult(path, resp)
+                && ['FAILED', 'UNKNOWN', 'PARTIAL_APPLY', 'PARTIAL_ROLLBACK'].indexOf(resp.state) >= 0) {
+            return resp;
+        }
+        var code = resp.code || resp.error;
+        if (resp.success !== false || typeof code !== 'string' || !/^[A-Z][A-Z0-9_]{1,63}$/.test(code)
+                || !_definitiveDeviceRejection(code)) {
+            throw new Error('OUTCOME_UNKNOWN');
+        }
+        var err = new Error(code);
+        err.known = true;
+        throw err;
     }
 
     // 仅固定 Task 4 配置路由使用；结构化设备拒绝是已知失败，断连/无效正文是 UNKNOWN。
     function _devicePost(path, payload) {
-        function unwrap(resp) {
-            if (!_isObject(resp)) throw new Error('OUTCOME_UNKNOWN');
-            if (resp.success === true) {
-                if (!_validManagedResult(path, resp.data)) throw new Error('OUTCOME_UNKNOWN');
-                return resp.data;
-            }
-            var code = resp.code || resp.error;
-            if (resp.success !== false || typeof code !== 'string' || !/^[A-Z][A-Z0-9_]{1,63}$/.test(code)
-                    || !_definitiveDeviceRejection(code)) {
-                throw new Error('OUTCOME_UNKNOWN');
-            }
-            var err = new Error(code);
-            err.known = true;
-            throw err;
-        }
         if (typeof window.apiPost === 'function') {
-            return Promise.resolve(window.apiPost(path, payload)).then(unwrap);
+            return Promise.resolve(window.apiPost(path, payload)).then(function (resp) {
+                return _unwrapManaged(path, resp);
+            });
         }
         return window.fetch(path, {
             method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
@@ -163,7 +181,7 @@
         }).then(function (resp) {
             return resp.json().then(function (body) {
                 if (!resp.ok && (!body || body.success !== false)) throw new Error('OUTCOME_UNKNOWN');
-                return unwrap(body);
+                return _unwrapManaged(path, body);
             }, function () { throw new Error('OUTCOME_UNKNOWN'); });
         });
     }
@@ -772,10 +790,11 @@
         _scheduleHeartbeat();
     }
 
-    function _scheduleRefresh() {
+    function _scheduleRefresh(retryDelay) {
         _clearTimer('refresh');
         if (!session) return;
-        var delay = session.tokenExpiresAt - TOKEN_REFRESH_MARGIN_MS - Date.now();
+        var delay = typeof retryDelay === 'number' ? retryDelay
+            : session.tokenExpiresAt - TOKEN_REFRESH_MARGIN_MS - Date.now();
         if (delay < 0) delay = 0;
         refreshTimer = setTimeout(function () {
             refreshTimer = null;
@@ -787,22 +806,43 @@
             _cloudPost(session.cloudBase + '/connector/v1/token/refresh', {}, session.token, null, false)
                 .then(function (resp) {
                     if (!session) return;
-                    if (resp && resp.status === 200 && resp.body && resp.body.connectorToken) {
-                        session.token = resp.body.connectorToken;
-                        session.tokenExpiresAt = resp.body.tokenExpiresAt;
-                        session.sessionExpiresAt = resp.body.sessionExpiresAt;
+                    var body = resp && resp.status === 200 ? resp.body : null;
+                    var validExpiry = body && typeof body.connectorToken === 'string' && body.connectorToken
+                        && typeof body.tokenExpiresAt === 'number' && typeof body.sessionExpiresAt === 'number'
+                        && Number.isFinite(body.tokenExpiresAt) && Number.isFinite(body.sessionExpiresAt)
+                        && body.tokenExpiresAt > Date.now() && body.sessionExpiresAt > Date.now();
+                    if (validExpiry) {
+                        session.token = body.connectorToken;
+                        session.tokenExpiresAt = body.tokenExpiresAt;
+                        session.sessionExpiresAt = body.sessionExpiresAt;
+                        refreshFailures = 0;
                         _save();
                     }
                     else if (resp && resp.status === 401) {
                         _expireSession();
                         return;
                     }
+                    else {
+                        _registerRefreshFailure();
+                        return;
+                    }
                     if (running) _scheduleRefresh();
                 })
                 .catch(function () {
-                    if (running) _scheduleRefresh();
+                    if (running) _registerRefreshFailure();
                 });
         }, delay);
+    }
+
+    function _registerRefreshFailure() {
+        refreshFailures++;
+        if (refreshFailures >= MAX_CONSECUTIVE_FAILURES) {
+            _haltUnreachable();
+            return;
+        }
+        var delay = Math.min(REFRESH_RETRY_MAX_MS,
+            REFRESH_RETRY_BASE_MS * Math.pow(2, refreshFailures - 1));
+        _scheduleRefresh(delay);
     }
 
     function _scheduleSessionCap() {
@@ -901,6 +941,7 @@
         running = true;
         wantResume = false;
         consecutiveErrors = 0;
+        refreshFailures = 0;
         lastState = 'online';
         _bindListeners();
         _scheduleHeartbeat();
@@ -942,7 +983,8 @@
             tokenExpiresAt: session ? session.tokenExpiresAt : null,
             sessionExpiresAt: session ? session.sessionExpiresAt : null,
             state: lastState,
-            consecutiveErrors: consecutiveErrors
+            consecutiveErrors: consecutiveErrors,
+            refreshFailures: refreshFailures
         };
     }
 

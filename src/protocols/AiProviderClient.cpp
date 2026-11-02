@@ -285,9 +285,6 @@ bool AiProviderClient::buildRequest(const AiProviderRequest& request, JsonDocume
         result["content"] = request.toolResult;
     }
     JsonArray tools = output["tools"].to<JsonArray>();
-    if (request.allowedTools.empty() || containsTool(request.allowedTools, "create_gpio_output")) {
-        addTool(tools, "create_gpio_output", "Create a GPIO digital output proposal", true);
-    }
     if (request.allowedTools.empty() || containsTool(request.allowedTools, "create_dht_sensor")) {
         addTool(tools, "create_dht_sensor", "Create a DHT sensor proposal", false);
     }
@@ -422,7 +419,7 @@ AiProviderResult AiProviderClient::completePost(AiProviderHttpClient& http, cons
             } else {
                 String error;
                 if (!parseResponse(response, request.allowedTools.empty()
-                        ? std::vector<String>{"create_gpio_output", "create_dht_sensor"}
+                        ? std::vector<String>{"create_dht_sensor"}
                         : request.allowedTools, reply, error)) {
                     result = AiProviderResult::failure(error == "AI_RESPONSE_TOO_LARGE"
                         ? AiProviderError::RESPONSE_TOO_LARGE

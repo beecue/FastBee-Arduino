@@ -70,7 +70,7 @@ const CONTROLS = {
   },
 };
 // 与固件 /api/mcp/config/snapshot 契约同形状的全局 revision
-const MCP_SNAPSHOT = { success: true, data: { revision: 'rev-a', sections: {} } };
+const MCP_SNAPSHOT = { success: true, revision: 'rev-a', sections: {} };
 
 // 与固件 /api/peripherals/types 契约同形状的外设类型目录
 const PERIPHERAL_TYPES = {
@@ -134,6 +134,11 @@ async function setup(page: any) {
         if ((window as any).snapshotFail) throw new Error('snapshot down');
         return structuredClone((window as any).MCP_SNAPSHOT);
       }
+      if (path === '/api/mcp/config/operations/op-browser') {
+        return { success: true, operationId: 'op-browser', state: 'APPLYING', steps: [
+          { section: 'features', state: 'PENDING', accepted: false, persisted: false, readback: false },
+        ] };
+      }
       if (path === '/api/device/config') return structuredClone((window as any).DEVICE_CONFIG);
       throw new Error('unexpected device api: ' + path);
     };
@@ -141,14 +146,23 @@ async function setup(page: any) {
       w.apiPostCalls.push({ path, body });
       if (path === '/api/mcp/config/apply') {
         if (w.applyResponses?.length) return w.applyResponses.shift();
-        return { success: true, data: { operationId: 'op-browser', state: 'SUCCEEDED' } };
+        return { success: true, operationId: 'op-browser', state: 'SUCCEEDED', steps: [
+          { section: 'features', state: 'SUCCEEDED', accepted: true, persisted: true, readback: true },
+        ] };
       }
-      if (path === '/api/mcp/config/preflight') return { success: true, data: { allowed: true, persisted: false } };
+      if (path === '/api/mcp/config/preflight') return { success: true, allowed: true, persisted: false };
       if (path === '/api/mcp/config/readback') {
         if (w.readbackDisconnect) throw new TypeError('network down');
-        return { success: true, data: { operationId: 'op-browser', state: 'SUCCEEDED' } };
+        return { success: true, operationId: 'op-browser', state: 'SUCCEEDED', steps: [
+          { section: 'features', state: 'SUCCEEDED', accepted: true, persisted: true, readback: true },
+        ] };
       }
-      if (path === '/api/mcp/config/rollback') return { success: true, data: { operationId: 'op-browser', state: 'ROLLED_BACK' } };
+      if (path === '/api/mcp/config/rollback') {
+        if (w.rollbackResponses?.length) return w.rollbackResponses.shift();
+        return { success: true, operationId: 'op-browser', state: 'ROLLED_BACK', steps: [
+          { section: 'features', state: 'SUCCEEDED', accepted: true, persisted: true, readback: true },
+        ] };
+      }
       throw new Error('unexpected device write api: ' + path);
     };
     w.fetch = (url: string, opts: any = {}) => {
@@ -159,6 +173,12 @@ async function setup(page: any) {
         Promise.resolve({ status, ok: status >= 200 && status < 300, json: async () => payload });
       if (u.pathname === '/connector/v1/pair') return respond(w.pairResponse.status, w.pairResponse.body);
       if (u.pathname === '/connector/v1/token/refresh') {
+        if (w.refreshInvalidExpiryOnce) {
+          w.refreshInvalidExpiryOnce = false;
+          return respond(200, { connectorToken: 'tok-invalid', tokenExpiresAt: Date.now() - 1,
+            sessionExpiresAt: w.pairResponse.body.sessionExpiresAt });
+        }
+        if (w.refreshOutage) return respond(503, { code: 'UNAVAILABLE' });
         return respond(200, {
           connectorToken: 'tok-2',
           tokenExpiresAt: Date.now() + 15 * 60_000,
@@ -270,17 +290,69 @@ test('managed apply job uses only the fixed same-origin apply API and forwards i
   expect(result.body.result.state).toBe('SUCCEEDED');
 });
 
+test('production top-level managed responses preserve success partial UNKNOWN snapshot and pending operation states', async ({ page }) => {
+  await setup(page);
+  await pair(page);
+  await page.evaluate(() => {
+    const w = window as any;
+    w.applyResponses = [{ success: true, operationId: 'op-partial', state: 'PARTIAL_APPLY', error: 'PARTIAL_APPLY',
+      manualRecoveryRequired: true, steps: [
+        { section: 'features', state: 'SUCCEEDED', accepted: true, persisted: true, readback: true },
+        { section: 'peripherals', state: 'PENDING', accepted: false, persisted: false, readback: false },
+      ] }];
+    w.rollbackResponses = [{ success: true, operationId: 'op-browser', state: 'PARTIAL_ROLLBACK', error: 'PARTIAL_ROLLBACK',
+      manualRecoveryRequired: true, steps: [
+        { section: 'features', state: 'FAILED', accepted: true, persisted: true, readback: false },
+      ] }];
+    w.FastBeeAiMcpConnector.start();
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).pendingPolls.length)).toBe(1);
+  await page.evaluate(() => {
+    (window as any).pendingPolls.shift()([
+      { jobId: 'job-snapshot', type: 'device.config.snapshot.read', idempotencyKey: 'k-s', deadlineAt: Date.now() + 60_000 },
+      { jobId: 'job-preflight', type: 'device.config.preflight', idempotencyKey: 'k-p', deadlineAt: Date.now() + 60_000,
+        baseRevision: 'rev-a', operations: [{ section: 'features' }] },
+      { jobId: 'job-partial', type: 'device.config.apply', idempotencyKey: 'k-a', deadlineAt: Date.now() + 60_000,
+        draftId: 'draft-1', baseRevision: 'rev-a', approvalHash: 'approval', deviceIdempotencyKey: 'd-a', operations: [] },
+      { jobId: 'job-operation', type: 'device.config.operation.read', operationId: 'op-browser', idempotencyKey: 'k-o',
+        deadlineAt: Date.now() + 60_000 },
+      { jobId: 'job-readback', type: 'device.config.readback', operationId: 'op-browser', idempotencyKey: 'k-r',
+        deadlineAt: Date.now() + 60_000 },
+      { jobId: 'job-rollback', type: 'device.config.rollback', operationId: 'op-browser', currentRevision: 'rev-b',
+        approvalHash: 'rollback-approval', deviceIdempotencyKey: 'd-r', idempotencyKey: 'k-b', deadlineAt: Date.now() + 60_000 },
+    ]);
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).cloudCalls.filter((c: any) => c.path.endsWith('/result')).length))
+    .toBe(6);
+  const calls = await page.evaluate(() => (window as any).cloudCalls);
+  const result = (id: string) => calls.find((c: any) => c.path.includes(id)).body;
+  expect(result('job-snapshot').status).toBe('SUCCEEDED');
+  expect(result('job-snapshot').result.revision).toBe('rev-a');
+  expect(result('job-preflight').status).toBe('SUCCEEDED');
+  expect(result('job-preflight').result.allowed).toBe(true);
+  expect(result('job-partial').status).toBe('SUCCEEDED');
+  expect(result('job-partial').result.state).toBe('PARTIAL_APPLY');
+  expect(result('job-partial').result.steps[1].state).toBe('PENDING');
+  expect(result('job-operation').status).toBe('SUCCEEDED');
+  expect(result('job-operation').result.state).toBe('APPLYING');
+  expect(result('job-operation').result.steps[0].state).toBe('PENDING');
+  expect(result('job-readback').status).toBe('SUCCEEDED');
+  expect(result('job-readback').result.state).toBe('SUCCEEDED');
+  expect(result('job-rollback').status).toBe('SUCCEEDED');
+  expect(result('job-rollback').result.state).toBe('PARTIAL_ROLLBACK');
+});
+
 test('malformed success data and structured UNKNOWN are UNKNOWN while definitive rejection stays FAILED', async ({ page }) => {
   await setup(page);
   await pair(page);
   await page.evaluate(() => {
     (window as any).applyResponses = [
-      { success: true, data: { state: 'SUCCEEDED' } },
-      { success: true, data: { operationId: 'op-bad-state', state: 'MAYBE' } },
+      { success: true, state: 'SUCCEEDED' },
+      { success: true, operationId: 'op-bad-state', state: 'MAYBE' },
       { success: false, data: { message: 'bad request' } },
       { success: false, code: 'OUTCOME_UNKNOWN' },
       { success: false, code: 'INVALID_ARGUMENT' },
-      { success: true, data: { operationId: 'op-success-unknown', state: 'FAILED', error: 'OUTCOME_UNKNOWN' } },
+      { success: true, operationId: 'op-success-unknown', state: 'FAILED', error: 'OUTCOME_UNKNOWN' },
     ];
     (window as any).FastBeeAiMcpConnector.start();
   });
@@ -432,6 +504,40 @@ test('token refreshes before expiry and session stops at absolute cap', async ({
   await expect.poll(() => page.evaluate(() => (window as any).FastBeeAiMcpConnector.status().running)).toBe(false);
   const cleared = await page.evaluate(() => window.sessionStorage.getItem('fastbee.mcp.connector.session'));
   expect(cleared).toBeNull();
+});
+
+test('refresh outage and invalid returned expiry use bounded exponential backoff then unreachable lifecycle', async ({ page }) => {
+  await setup(page);
+  await page.evaluate(() => {
+    const w = window as any;
+    w.pairResponse.body.tokenExpiresAt = Date.now() + 61_000;
+    w.refreshInvalidExpiryOnce = true;
+    w.refreshOutage = true;
+  });
+  await pair(page);
+  await page.evaluate(() => (window as any).FastBeeAiMcpConnector.start());
+  await page.clock.runFor(2000);
+  await expect.poll(() => page.evaluate(() => (window as any).cloudCalls.filter((c: any) => c.path === '/connector/v1/token/refresh').length))
+    .toBe(1);
+  expect(await page.evaluate(() => window.sessionStorage.getItem('fastbee.mcp.connector.session'))).not.toContain('tok-invalid');
+  expect(await page.evaluate(() => (window as any).FastBeeAiMcpConnector.status().refreshFailures)).toBe(1);
+  await page.clock.runFor(500);
+  expect(await page.evaluate(() => (window as any).cloudCalls.filter((c: any) => c.path === '/connector/v1/token/refresh').length))
+    .toBe(1);
+  for (let i = 0; i < 80; i++) {
+    await page.clock.runFor(5000);
+    if (!(await page.evaluate(() => (window as any).FastBeeAiMcpConnector.status().running))) break;
+  }
+  const status = await page.evaluate(() => (window as any).FastBeeAiMcpConnector.status());
+  expect(status.running).toBe(false);
+  expect(status.state).toBe('unreachable');
+  const calls = await page.evaluate(() => (window as any).cloudCalls);
+  const refreshCount = calls.filter((c: any) => c.path === '/connector/v1/token/refresh').length;
+  expect(refreshCount).toBeGreaterThan(2);
+  expect(refreshCount).toBeLessThanOrEqual(10);
+  const total = calls.length;
+  await page.clock.runFor(300000);
+  expect(await page.evaluate(() => (window as any).cloudCalls.length)).toBe(total);
 });
 
 test('without pairing the connector stays inert and issues no requests', async ({ page }) => {

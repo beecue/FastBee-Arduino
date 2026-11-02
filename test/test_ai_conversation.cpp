@@ -84,7 +84,7 @@ void test_local_chat_without_mcp_and_history_bound() {
 
 void test_local_tool_becomes_trusted_proposal_not_direct_write() {
     FakeTransport transport;
-    transport.tools = {"create_gpio_output"};
+    transport.tools = {"create_dht_sensor"};
     AiProposalService proposals;
     int writes = 0;
     proposals.setExecutor([&](const AiProposal&, String&) {
@@ -97,11 +97,13 @@ void test_local_tool_becomes_trusted_proposal_not_direct_write() {
     String error;
     TEST_ASSERT_TRUE(manager.start(error));
     String jobId;
-    TEST_ASSERT_TRUE(manager.submit({"a"}, "GPIO4 继电器", "", jobId).success);
+    TEST_ASSERT_TRUE(manager.submit({"a"}, "GPIO4 温湿度", "", jobId).success);
     AiJobSnapshot snapshot;
     TEST_ASSERT_TRUE(waitFor(manager, {"a"}, jobId, AiJobState::COMPLETED, snapshot));
     TEST_ASSERT_FALSE(snapshot.proposalId.isEmpty());
     TEST_ASSERT_EQUAL(0, writes);
+    TEST_ASSERT_EQUAL(1, transport.lastRequest.allowedTools.size());
+    TEST_ASSERT_EQUAL_STRING("create_dht_sensor", transport.lastRequest.allowedTools[0].c_str());
     auto execution = manager.executeProposal({"a"}, snapshot.proposalId, "确认执行");
     TEST_ASSERT_TRUE(execution.accepted);
     TEST_ASSERT_EQUAL(1, writes);
