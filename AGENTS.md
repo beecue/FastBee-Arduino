@@ -20,6 +20,8 @@ FastBee-Arduino 是面向 ESP32 系列的零代码 Web 物联网固件，通过�
 
 固件使用 C++、Arduino 框架和 PlatformIO；Node.js 用于 Web 资源构建及主机测试，不是设备运行时。芯片、Flash、PSRAM、分区和功能裁剪以 `platformio.ini` 及对应板卡配置为准。
 
+AI 助手的 MCP 云服务在独立仓库 `D:\project\gitlab\fastbee-admin` 开发：该仓库的 `springboot/` 是后端（包含 MCP 服务及文档处理 worker），`vue/` 是配置与监测管理前端。本仓库负责设备配置契约、固件受控应用 API、设备端 AI 和浏览器 MCP 连接器，不在此实现 Java/Python 云端服务。跨仓库改动须先检查双方 `AGENTS.md` 与 `git status --short`，保留各自既有功能；整合实施计划见 `docs/superpowers/plans/2026-10-31-fastbee-admin-mcp-ai-configuration.md`。
+
 | 路径 | 职责与修改入口 |
 | --- | --- |
 | `src/`、`include/` | 固件实现及对应头文件，按同名模块组织（`core`、`network`、`peripherals`、`protocols`、`screen`、`security`、`systems`、`utils`） |
