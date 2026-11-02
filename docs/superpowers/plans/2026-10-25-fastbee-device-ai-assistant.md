@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在 ESP32-S3 + PSRAM 的 FastBee 设备上交付由“功能配置”按需启用的 BYOK AI 对话 MVP，以“AI 对话 / 连接配置”双 Tab 提供本地模型对话和外设配置闭环，并将 MCP 文档上传检索作为完全可选的增强能力。
+**Goal:** 在全部 ESP32-S3 正式设备上交付由“功能配置”按需启用的同一套 BYOK AI 对话功能，以“AI 对话 / 连接配置”双 Tab 提供本地模型对话和外设配置闭环，并将 MCP 文档上传检索作为完全可选的增强能力。
 
 **Architecture:** 浏览器只与设备同源 API 通信，设备端单工作线程调用 OpenAI 兼容的 `/chat/completions`；首版使用有界非流式响应和任务轮询，不在 AsyncWebServer 回调中执行 TLS。模型只能返回受支持技能的提案，不能直接访问管理器；提案经生产配置解析、预检和用户确认后才可执行。Task 1～6 是不依赖任何 MCP 代码、服务或网络连接的本地 AI 核心，Task 7 才增加可选 MCP 文档增强。
 
@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 所有既有正式构建环境保持 `FASTBEE_ENABLE_AI=0`；首个 AI 构建只为 `esp32s3-F16R8` 显式启用。`aiAssistant` 必须出现在现有“功能配置”页且默认关闭，只有用户在该页主动启用后才创建任务、队列、TLS 或会话缓冲；AI 页面不得另设启用开关，`PUT /api/ai/config` 也不得修改启用意图。
+- `esp32s3-F8R0`、`esp32s3-F8R8`、`esp32s3-F16R8` 全部显式启用 `FASTBEE_ENABLE_AI=1`，提供相同页面、协议、技能、历史和文档增强，不设置能力档位；classic ESP32、C3、C6 保持编译关闭。`aiAssistant` 必须出现在现有“功能配置”页且默认关闭，只有用户主动启用后才创建任务、队列、TLS 或会话缓冲；AI 页面不得另设启用开关，两个 AI 配置 API 也不得修改启用意图。
 - 只支持已验证的 Wi-Fi/以太网 HTTPS 路径；使用 CA bundle、有效系统时间和证书校验，禁止 `setInsecure()`、自动重定向以及 URL 中的用户信息、query 和 fragment。
 - API Key 只保存在设备配置中，GET 响应固定返回 `apiKeyConfigured`，永不返回原 Key；日志、错误、聊天上下文和通用配置导出不得包含 Key。
 - 内部 DRAM、最大连续内部块和 PSRAM 分开准入门控；不得用 PSRAM 余量替代内部 RAM，也不得为通过测试降低既有阈值。
@@ -46,10 +46,10 @@
 
 | 原方案内容 | 评估 | 新计划处理 |
 | --- | --- | --- |
-| P0 用 2–3 人周同时完成客户端、配置、聊天、技能、TLS 和实机稳定性 | 低估异步任务、认证、密钥、确认幂等、故障恢复和全矩阵回归成本 | MVP 预计 20–30 人日；先交付两个技能，实机与长期验收独立列证据 |
+| P0 用 2–3 人周同时完成客户端、配置、聊天、技能、TLS 和实机稳定性 | 低估异步任务、认证、密钥、确认幂等、故障恢复和全矩阵回归成本 | MVP 预计 21–31 人日；先交付两个技能，三个 S3 的实机与长期验收独立列证据 |
 | 浏览器直连或设备中继尚未选定 | 浏览器直连会引入 CORS、Key 暴露和供应商差异，无法形成统一安全边界 | 明确设备中继；浏览器永不持有模型 Key |
 | 复用 `HTTPClientWrapper` | 当前仓库没有该组件；已有 `HTTPClient + WiFiClientSecure` 和 CA bundle 路径 | 复用 `RemoteResourceManager` 的 HTTPS 模式，不虚构新基础库 |
-| 所有 AI 吞吐内存放 PSRAM | TLS、socket、lwIP 和任务栈仍消耗内部 DRAM | 分别设置 DRAM/连续块/PSRAM 准入，响应缓冲才优先放 PSRAM |
+| 所有 AI 吞吐内存放 PSRAM | TLS、socket、lwIP 和任务栈仍消耗内部 DRAM，无 PSRAM 的 S3 也必须支持 | 有界流式过滤解析，按硬件选择工作缓冲，分别设置 DRAM/连续块/PSRAM 准入 |
 | AI 请求期间暂停 TaskManager/Modbus | 会破坏本地采集和规则连续性，也不符合故障恢复约束 | 单工作线程、外部 HTTPS 互斥、内存不足时拒绝 AI，不暂停业务 |
 | 直接调用 `addPeripheral` / `handleDataCommand` | 前者不等于完整预检和持久化，后者返回值不等于物理动作结果 | 抽取 Web 与 AI 共用的外设变更执行器，复用 preflight 和 `addPeripheralAndSave` |
 | 解析失败后多轮自动纠错 | 会放大 token 成本、延迟和不确定性 | MVP 不自动重试；把结构化错误返回给用户，由用户决定是否重发 |
@@ -78,7 +78,7 @@
 - 不在固件中接收、解析或持久化 PDF、Word、图片，不在本地 AI 核心中包含文档检索；自动 Modbus 寄存器配置仍不在当前范围。
 - 不做语音、唤醒词、ASR/TTS。
 - 不做任意外设/规则/脚本生成、自动修复循环、多工具自主 Agent。
-- 不承诺所有芯片启用 AI；classic ESP32、C3、C6 和无 PSRAM S3 保持编译关闭。
+- 不承诺 classic ESP32、C3、C6 启用 AI；三个 ESP32-S3 正式环境必须提供同一功能，无 PSRAM 的 S3 不通过砍功能规避实现和验收。
 - 不做 L0 关键词控制；避免与 AI 入口形成两套未统一的命令和权限路径。
 
 ## 3. 接口与数据契约
@@ -203,27 +203,27 @@ public:
 | `esp32c3-F4R0` | 无 | app0 3.1875 MiB | 768 KiB | 编译关闭；零 AI 任务，默认配置与长稳无回归 |
 | `esp32c6-F4R0` | 无 | app0 3.1875 MiB | 768 KiB | 编译关闭；零 AI 任务，默认配置与长稳无回归 |
 | `esp32c6-F8R0` | 无 | app0/app1 各 3.5 MiB | 960 KiB | 编译关闭；OTA 双槽与长稳无回归 |
-| `esp32s3-F8R0` | 无 | app0/app1 各 3.5 MiB | 960 KiB | 编译关闭；无 PSRAM 不开放 AI_MINI 旁路 |
-| `esp32s3-F8R8` | 8 MiB | app0/app1 各 3.5 MiB | 960 KiB | 本阶段编译关闭；不能因也是 S3R8 就继承 F16R8 结论 |
-| `esp32s3-F16R8` | 8 MiB | app0/app1 各 7 MiB | 1984 KiB | 唯一 AI 目标；分别验证默认关闭、启用对话、关闭回收及可选文档增强 |
+| `esp32s3-F8R0` | 无 | app0/app1 各 3.5 MiB | 960 KiB | 编译支持、默认关闭；与另两种 S3 相同功能，验证无 PSRAM 的 TLS/解析/回收 |
+| `esp32s3-F8R8` | 8 MiB | app0/app1 各 3.5 MiB | 960 KiB | 编译支持、默认关闭；独立验证，不能继承 F16R8 结论 |
+| `esp32s3-F16R8` | 8 MiB | app0/app1 各 7 MiB | 1984 KiB | 编译支持、默认关闭；验证启用对话、关闭回收及可选文档增强 |
 
 ### 4.5 AI 初始设计上限与超限处理
 
 以下是实现必须执行的设计上限，不是实测节省或长期稳定结论；超过上限必须停止并评审，不得为通过而直接调大：
 
-- 固件 Flash 增量最多 256 KiB，Web 发布资源 gzip 增量最多 32 KiB；`esp32s3-F16R8` 必须同时满足 app0/app1 分区余量和 OTA 回退要求，其他环境不得链入 AI provider/conversation/proposal 实现。
+- 三个 S3 环境的固件 Flash 增量均最多 256 KiB，Web 发布资源 gzip 增量均最多 32 KiB；每种环境都必须满足 app0/app1 分区余量和 OTA 回退要求，六个非 S3 环境不得链入 AI provider/conversation/proposal 实现。
 - AI 管理器常驻内部 DRAM 设计上限 16 KiB，工作线程栈 8192 字节；TLS/socket/lwIP 另按现有内部 DRAM 与最大连续块准入，不得把 16 KiB 当作整个请求峰值。
-- 模型响应最大 64 KiB、文档上下文最大 12 KiB、历史最多 4 轮，AI 会话/解析/历史合计 PSRAM 设计上限 256 KiB，TLS 使用的 PSRAM 另计；无 PSRAM 或分配失败时拒绝 AI 请求，不回落内部 DRAM 硬撑。
+- 模型响应最大 64 KiB、文档上下文最大 12 KiB、历史最多 4 轮，三种 S3 的功能与上限一致。响应采用有界流式过滤解析，保留文本和工具参数而非完整响应 DOM；带 PSRAM 时会话/解析/历史上限 256 KiB，无 PSRAM 时同类工作集内部 DRAM 上限 96 KiB，TLS 另计。内存适配只改变分配位置，不减少历史、技能、文档上下文或页面功能。
 - `/config/ai.json` 最大 4 KiB，只保存连接配置，不保存聊天、文档、配对令牌或历史；设备 LittleFS 不因文档上传增长。
 - 运行期门槛继续使用 `scripts/device-stability-thresholds.json`：正常窗口失败率/异常重启为 0，并满足内部堆、最大块、PSRAM 和延迟阈值；正常负载出现 `no-memory`、非预期 WebGuard 503、看门狗/OOM 或正文截断均不通过。
-- 超限处理顺序为拒绝新 AI 会话并保留用户配置、取消可回收的 AI 资源、恢复现有业务；不得暂停采集/规则、删除配置、自动降低其他功能或反复重启。
+- 超限处理顺序为拒绝新 AI 会话并保留用户配置、取消可回收的 AI 资源、恢复现有业务；不得暂停采集/规则、删除配置、自动降低其他功能、削减 AI 功能档位或反复重启。
 
 ### 4.6 全设备长期稳定性准入
 
 跨芯片公共逻辑、MQTT/HTTPS 互斥和 Web 构建发生变化时，九个正式环境都要保留本轮构建与对应硬件证据，不能用一台 S3 代表全部设备。每个环境按相同业务配置执行 8 小时 Web 功能验收、24 小时及后续 72 小时观察，记录实际连续时长、采样覆盖和预期业务。
 
-- 八个 AI 编译关闭环境：验证默认配置没有 AI 任务/路由资源，既有 MQTT/Modbus/采集/规则、浏览器和 OTA 能力无回归。
-- `esp32s3-F16R8`：分别覆盖 AI 默认关闭、AI 启用下持续采集/MQTT/规则/浏览器/对话峰值、重复启停与断网恢复；可选文档增强另开观察窗口，不与故障注入混合。
+- 六个非 S3 的 AI 编译关闭环境：验证默认配置没有 AI 任务/路由资源，既有 MQTT/Modbus/采集/规则、浏览器和 OTA 能力无回归。
+- 三个 S3 环境：分别覆盖 AI 默认关闭、AI 启用下持续采集/MQTT/规则/浏览器/对话峰值、重复启停与断网恢复；`esp32s3-F8R0` 额外核对无 PSRAM 内存适配，`esp32s3-F8R8` 和 `esp32s3-F16R8` 分别留证。可选文档增强另开观察窗口，不与故障注入混合。
 - 长测使用可控 OpenAI 兼容测试服务避免外部计费和供应商波动，另以少量真实 BYOK 请求验证兼容性；测试服务也必须走真实 TLS、解析和设备执行路径。
 - 缺少任一硬件、输入变化、观察中断、时长不足、业务采样缺失或阈值不满足时，该组合标记“待验证/不通过”；只有所有目标组合证据齐全才可声明正式矩阵长期稳定通过。
 
@@ -254,18 +254,18 @@ public:
 - Produces: `FASTBEE_ENABLE_AI`、运行时键 `aiAssistant`、`AiConfigStore::{load,saveProvider,saveMcpBaseUrl,validateProvider,validateMcpBaseUrl}`；默认配置路径为 `/config/ai.json`。
 
 - [ ] **Step 1: 写配置与资源预算失败测试**
-  在 `test_ai_config.cpp` 覆盖：HTTPS URL 合法化；HTTP、凭据、query、fragment、非法路径、空模型和超长 Key 被拒绝；保存失败保留旧配置；空提交 Key 保留旧值而显式清除才删除。另覆盖 DeepSeek 预设、空 MCP 地址、MCP 保存失败不影响 provider，以及无 MCP 时 provider 加载成功。Python 测试覆盖默认配置、恢复出厂、九环境矩阵、AI 仅 F16R8 编入、第 4.5 节上限以及基线/候选报告必须包含 Flash、静态 RAM、内部 DRAM、最大连续块、PSRAM、任务栈和证据字段。
+  在 `test_ai_config.cpp` 覆盖：HTTPS URL 合法化；HTTP、凭据、query、fragment、非法路径、空模型和超长 Key 被拒绝；保存失败保留旧配置；空提交 Key 保留旧值而显式清除才删除。另覆盖 DeepSeek 预设、空 MCP 地址、MCP 保存失败不影响 provider，以及无 MCP 时 provider 加载成功。Python 测试覆盖默认配置、恢复出厂、九环境矩阵、三个 S3 均编入同一 AI 且六个非 S3 关闭、第 4.5 节上限以及基线/候选报告必须包含 Flash、静态 RAM、内部 DRAM、最大连续块、PSRAM、任务栈和证据字段。
 
 - [ ] **Step 2: 运行配置和资源测试确认失败**
   Run: `npm run test:native` 和使用 PlatformIO penv Python 的 `python -m unittest test/unit/test_feature_config_persistence_contract.py test/unit/test_factory_reset_persistence_contract.py test/unit/test_ai_resource_budget.py -v`。
   Expected: 因 AI 类型、注册项、报告或预算校验尚不存在而失败。
 
 - [ ] **Step 3: 实现最小功能、配置存储和资源报告**
-  在 `FeatureFlags.h` 将 `FASTBEE_ENABLE_AI` 默认定义为 0，只在 `esp32s3-F16R8` 设为 1；注册默认关闭、`requiresNetwork=true`、显示名为“AI 助手”的 `aiAssistant`。`AiConfigStore` 使用原子保存和脱敏语义，provider 与 MCP 分区更新保留 sibling 字段；恢复出厂删除所有代际。`ai-resource-report.mjs` 从当前构建 map、固件、LittleFS 镜像和设备采样生成基线/候选差值，不根据环境名推断实测余量；`ai-resource-budget.md` 记录九环境结果和缺失证据。
+  在 `FeatureFlags.h` 将 `FASTBEE_ENABLE_AI` 默认定义为 0，在 `esp32s3-F8R0`、`esp32s3-F8R8`、`esp32s3-F16R8` 均设为 1；注册默认关闭、`requiresNetwork=true`、显示名为“AI 助手”的 `aiAssistant`，三环境的页面、协议和功能完全一致。`AiConfigStore` 使用原子保存和脱敏语义，provider 与 MCP 分区更新保留 sibling 字段；恢复出厂删除所有代际。`ai-resource-report.mjs` 生成基线/候选差值，`ai-resource-budget.md` 记录九环境结果和缺失证据。
 
-- [ ] **Step 4: 运行定向回归并建立首轮容量基线**
-  Run: `npm run test:native`、`npm run test:unit`、`npm run test:firmware -- esp32s3-F16R8`、`npm run test:firmware -- esp32-F4R0`、`node scripts/ai-resource-report.mjs`。
-  Expected: 测试和构建 PASS；报告包含实际 Flash/静态 RAM/LittleFS 和“运行期待验证”项，不以构建成功替代设备内存测量。
+- [ ] **Step 4: 运行定向回归并建立 S3 容量基线**
+  Run: `npm run test:native`、`npm run test:unit`、`npm run test:firmware -- esp32s3-F8R0`、`npm run test:firmware -- esp32s3-F8R8`、`npm run test:firmware -- esp32s3-F16R8`、`npm run test:firmware -- esp32-F4R0`、`node scripts/ai-resource-report.mjs`。
+  Expected: 测试和构建 PASS；报告包含三个 S3 及非 S3 对照的实际 Flash/静态 RAM/LittleFS 和“运行期待验证”项，不以构建成功替代设备内存测量。
 
 - [ ] **Step 5: 授权后提交本任务**
   ```bash
@@ -287,14 +287,14 @@ public:
 - Produces: `AiProviderTransport::complete()`、`AiProviderReply`、固定 `AiProviderError`；后续会话层只消费该接口和 fake transport。
 
 - [ ] **Step 1: 写协议失败测试和固定样本**
-  覆盖文本答复、单个工具调用、工具参数不是合法 JSON 字符串、多个工具调用、未知工具、缺参数、额外字段、嵌套过深、64 KiB 截断、401/403、429、5xx、无效 JSON 和空 choices；断言错误中不含 Key 和供应商原文。
+  覆盖文本答复、单个工具调用、工具参数不是合法 JSON 字符串、多个工具调用、未知工具、缺参数、额外字段、嵌套过深、64 KiB 截断、401/403、429、5xx、无效 JSON 和空 choices；断言错误中不含 Key 和供应商原文。同一 fixture 分别在模拟有/无 PSRAM 分配器下运行，断言输出、历史和工具提案一致，且无 PSRAM 路径不创建完整响应 DOM。
 
 - [ ] **Step 2: 运行 Native 测试确认失败**
   Run: `npm run test:native`。
   Expected: `AiProviderTransport` 或对应解析行为不存在，测试失败。
 
 - [ ] **Step 3: 实现有界非流式客户端**
-  使用 fake transport 可测试的纯解析层与 Arduino 传输层分离。HTTPS 配置采用 CA bundle、禁止重定向、限制 `Content-Length` 和 chunked 读取；响应缓冲优先 PSRAM，任何分配失败返回固定错误。只构造一次 `/chat/completions` 请求，不自动重试，不把模型文本当 JSON 直接写配置。
+  使用 fake transport 可测试的纯解析层与 Arduino 传输层分离。HTTPS 配置采用 CA bundle、禁止重定向、限制 `Content-Length` 和 chunked 读取；以有界流式过滤解析提取文本和工具参数，带 PSRAM 时可使用 PSRAM 工作缓冲，无 PSRAM 时受第 4.5 节内部 DRAM 上限约束，不缓存完整 64 KiB 响应。只构造一次 `/chat/completions` 请求，不自动重试，不把模型文本当 JSON 直接写配置。
 
 - [ ] **Step 4: 运行协议与 Native 回归**
   Run: `npm run test:native`。
@@ -365,14 +365,14 @@ public:
 - Produces: `AiConversationManager` 生命周期和轮询快照；`ExternalHttpsGate` 有界互斥，AI/天气/MQTTS 握手共用，MQTTS 具有抢占 AI/天气的优先级。
 
 - [ ] **Step 1: 写生命周期失败测试**
-  覆盖未启用零任务、重复 start/stop、活动 job 唯一性、会话隔离、4 轮历史、2000 字节消息、12 KiB 文档上下文、45 秒 deadline、取消、低 DRAM/最大连续块不足、OTA、时间未同步、MQTTS/天气占用、MQTTS 在 AI 请求中途重连、运行时关闭和 worker 栈/缓冲释放；额外断言常驻内部 DRAM 16 KiB、会话/解析/历史 PSRAM 256 KiB 设计上限，100 次会话后资源回到基线容差内。
+  覆盖未启用零任务、重复 start/stop、活动 job 唯一性、会话隔离、4 轮历史、2000 字节消息、12 KiB 文档上下文、45 秒 deadline、取消、低 DRAM/最大连续块不足、OTA、时间未同步、MQTTS/天气占用、MQTTS 在 AI 请求中途重连、运行时关闭和 worker 栈/缓冲释放；分别模拟 S3 有/无 PSRAM，断言相同会话功能、常驻内部 DRAM 16 KiB、PSRAM 256 KiB 或无 PSRAM 内部工作集 96 KiB 上限，100 次会话后资源回到基线容差内。
 
 - [ ] **Step 2: 运行测试确认失败**
   Run: `npm run test:native` 和 `python -m unittest test/unit/test_worker_demand_lifecycle.py test/unit/test_mqtt_client_lease.py -v`。
   Expected: 新会话与互斥行为未实现而失败，既有 MQTT lease 基线不回归。
 
 - [ ] **Step 3: 实现会话管理器与 HTTPS 互斥**
-  工作线程栈初始 8192 字节，队列深度 1、活动 job 1、历史 4 轮，常驻内部 DRAM 和 PSRAM 分配执行第 4.5 节硬上限；无 PSRAM 不分配会话。等待锁和网络均不无限阻塞。AI/天气取得 lease 后才能握手；MQTTS 重连请求优先权后禁止新 AI/天气 lease，取消当前 AI/天气并有界等待释放，然后沿用现有 MQTTS 内存准入。AI 不暂停 TaskManager/MQTT/采集。停止时先拒绝新 job，再请求取消并等待有界退出；超时保留 `stopping`，不删除仍被 worker 引用的上下文。
+  工作线程栈初始 8192 字节，队列深度 1、活动 job 1、历史 4 轮，有/无 PSRAM 使用同一状态机并按第 4.5 节选择有界分配器；无 PSRAM 也通过准入后创建完整会话，分配失败才拒绝新 job。等待锁和网络均不无限阻塞。AI/天气取得 lease 后才能握手；MQTTS 重连请求优先权后禁止新 AI/天气 lease，取消当前 AI/天气并有界等待释放，然后沿用现有 MQTTS 内存准入。AI 不暂停 TaskManager/MQTT/采集。停止时先拒绝新 job，再请求取消并等待有界退出；超时保留 `stopping`，不删除仍被 worker 引用的上下文。
 
 - [ ] **Step 4: 运行 Native 与资源生命周期回归**
   Run: `npm run test:regression`。
@@ -430,7 +430,7 @@ public:
 - Modify: `web-src/index.html`
 - Modify: `web-src/js/module-loader.js`
 - Modify: `web-src/css/main.css`
-- Modify: `test/browser/offline-device-profiles.json`（只增加一个 AI 编译/启用模拟档案，不改变既有档案默认值）
+- Modify: `test/browser/offline-device-profiles.json`（为三个 S3 环境增加相同 AI 能力的模拟档案，不改变既有档案默认值）
 
 **Interfaces:**
 - Consumes: Task 5 API、现有菜单能力状态、ModuleLoader、Notification 和离线 mock。
@@ -446,9 +446,9 @@ public:
 - [ ] **Step 3: 实现双 Tab 和独立配置区域**
   “AI 对话”Tab 包含消息、附件禁用入口、提案和 Issue 草稿；“连接配置”Tab 包含两个独立表单：DeepSeek/OpenAI 兼容参数，以及可选 MCP 地址。默认 Tab 为 AI 对话，Tab 状态只用于展示，不写功能开关。复用 `/api/features/status` 展示真实状态；本地模型与 MCP 分别调用各自保存 API，MCP 区域不发起健康检查或配对请求。页面卸载时取消定时器/AbortController。
 
-- [ ] **Step 4: 构建资源并在无 MCP 环境运行核心回归**
-  Run: `node scripts/build-web-assets.js --env=esp32s3-F16R8`、`npm --prefix test/browser run test:offline-ui -- suites/51-ai-chat.spec.ts`、`npm run test:e2e:offline`。
-  Expected: 核心用例和既有离线矩阵 PASS；发布资源通过 gzip/清单门禁，核心包不包含文档服务客户端。
+- [ ] **Step 4: 构建三个 S3 的 Web 资源并在无 MCP 环境运行核心回归**
+  Run: `node scripts/build-web-assets.js --env=esp32s3-F8R0`、`node scripts/build-web-assets.js --env=esp32s3-F8R8`、`node scripts/build-web-assets.js --env=esp32s3-F16R8`、`npm --prefix test/browser run test:offline-ui -- suites/51-ai-chat.spec.ts`、`npm run test:e2e:offline`。
+  Expected: 三个 S3 的页面和功能一致，核心用例与既有离线矩阵 PASS；发布资源通过 gzip/清单门禁，核心包不包含文档服务客户端。
 
 - [ ] **Step 5: 授权后提交本地核心**
   ```bash
@@ -513,16 +513,16 @@ public:
 
 - [ ] **Step 3: 构建九个正式环境并生成容量报告**
   Run: `npm run test:firmware`，再执行 `./scripts/test-all.ps1 -Checks static,native,build,artifacts`（PowerShell）和 `node scripts/ai-resource-report.mjs`。
-  Expected: 九个环境构建通过；只有 F16R8 编入 AI；报告逐环境包含固件/静态 RAM/app/LittleFS 占用与差值，满足第 4.5 节上限且无未经评审的分区变化。
+  Expected: 九个环境构建通过；三个 S3 均编入同一 AI 功能、六个非 S3 未链入 AI 实现；报告逐环境包含固件/静态 RAM/app/LittleFS 占用与差值，满足第 4.5 节上限且无未经评审的分区变化。
 
-- [ ] **Step 4: 执行无 MCP 实机核心验收**
-  核对 MAC/芯片/IP/Flash/PSRAM 和产物摘要并备份配置。在不配置 MCP 且云端不可达时，使用测试供应商或用户 BYOK 完成两个技能闭环，注入非法模型输出、过期/重复确认、断网、超时、低内存和运行时关闭；保存配置回读、内部 DRAM、最大连续块、PSRAM、任务栈高水位和重复 100 次会话后的回收证据。未经授权不得烧录或触发继电器。
+- [ ] **Step 4: 在三个 S3 上分别执行无 MCP 实机核心验收**
+  分别核对 `esp32s3-F8R0`、`esp32s3-F8R8`、`esp32s3-F16R8` 的 MAC/芯片/IP/Flash/PSRAM 和产物摘要并备份配置。在不配置 MCP 且云端不可达时，三种设备都使用相同测试输入完成两个技能、4 轮历史和 12 KiB 文档上下文闭环，注入非法输出、过期/重复确认、断网、超时、低内存和运行时关闭；保存配置回读、内部 DRAM、最大连续块、PSRAM、任务栈高水位和重复 100 次会话后的回收证据。任何一台未测都不能宣称 S3 系列通过，未经授权不得烧录或触发继电器。
 
-- [ ] **Step 5: 可选执行文档增强验收**
-  仅在云服务 Task 5 已部署且用户授权时，上传 PDF、DOC、DOCX、PNG、JPEG，验证配对、解析、检索、删除和跨租户拒绝；确认设备 LittleFS 无文档增长且浏览器直连不占用固件上传缓冲。随后关闭云端并重复 Step 4 的关键本地对话。未执行时标记“文档增强待验证”，不得改低核心结论。
+- [ ] **Step 5: 可选执行三个 S3 的文档增强验收**
+  仅在云服务 Task 5 已部署且用户授权时，三种 S3 均上传 PDF、DOC、DOCX、PNG、JPEG，验证配对、解析、检索、删除和跨租户拒绝；确认设备 LittleFS 无文档增长且浏览器直连不占用固件上传缓冲。随后关闭云端并重复 Step 4 的关键本地对话。未执行时标记“文档增强待验证”，不得改低核心结论。
 
 - [ ] **Step 6: 执行九环境长期稳定性和资源趋势验收**
-  按第 4.6 节逐硬件执行 8 小时 Web、24 小时及后续 72 小时观察，运行现有 `device-stability-thresholds.json` release 门槛并保存资源趋势。八个 AI 关闭环境验证零任务与既有业务；F16R8 分开验证 AI 关闭、AI 启用和可选文档窗口。正常负载与故障注入分开，任何缺失组合、非预期重启/OOM/看门狗、持续泄漏、超阈值下降、正文截断或非预期 503 均不得判对应组合通过。
+  按第 4.6 节逐硬件执行 8 小时 Web、24 小时及后续 72 小时观察，运行现有 `device-stability-thresholds.json` release 门槛并保存资源趋势。六个非 S3 环境验证零任务与既有业务；三个 S3 分别验证 AI 关闭、AI 启用和可选文档窗口，不用任一 S3 的结果代替另外两种。正常负载与故障注入分开，任何缺失组合、非预期重启/OOM/看门狗、持续泄漏、超阈值下降、正文截断或非预期 503 均不得判对应组合通过。
 
 - [ ] **Step 7: 授权后提交文档与验证记录**
   ```bash
@@ -547,8 +547,8 @@ MCP 云服务见 `docs/superpowers/plans/2026-10-25-fastbee-mcp-cloud-service.md
 | Task 1–2 | 4–6 人日 | 默认关闭的独立配置与模型协议 |
 | Task 3–5 | 8–12 人日 | 提案、共享预检、工作线程和认证 API |
 | Task 6 | 3–5 人日 | 双 Tab 与无 MCP 本地核心页面 |
-| Task 8 核心验收 | 3–5 人日 | 无 MCP 全矩阵构建和首轮实机证据 |
+| Task 8 核心验收 | 4–6 人日 | 无 MCP 全矩阵构建和三个 S3 的首轮实机证据 |
 | Task 7 可选增强 | 4–6 人日 | MCP 配对、文档上传检索及降级回归 |
 | 长稳观察 | 按 8h/24h/72h 实际窗口 | 不计入开发人日，不能用自动等待替代业务覆盖 |
 
-本地 AI 核心合计约 18–28 人日，另留 2 人日回归，总计约 20–30 人日；可选文档增强另计 4–6 人日。核心验收不得等待 Task 7 或云端服务，增强延期也不得改变核心排期和完成结论。
+本地 AI 核心合计约 19–29 人日，另留 2 人日回归，总计约 21–31 人日；可选文档增强另计 4–6 人日。核心验收不得等待 Task 7 或云端服务，增强延期也不得改变核心排期和完成结论。
