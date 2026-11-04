@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "preparedAt": "2026-11-03",
+  "fixtureId": "mcp-post-flash-acceptance",
+  "deploymentAllowed": false,
+  "directImportAllowed": false,
+  "authorization": {
+    "explicitDeviceAuthorizationRequired": true,
+    "explicitOutputAuthorizationRequired": true,
+    "note": "User approval of the implementation plan is not device identity evidence or permission to replay writes."
+  },
+  "candidateTargets": [
+    {
+      "environment": "esp32s3-F16R8",
+      "port": "COM15",
+      "expectedMacSuffix": "14:C1:9F:C1:52:D8",
+      "discoveredStaAddress": "192.168.5.68",
+      "status": "ONLINE_AUTH_FAILED_OUTPUT_SAFETY_UNCONFIRMED",
+      "lastReadOnlyObservation": {
+        "date": "2026-11-03",
+        "healthStatus": 200,
+        "systemStatus": 200,
+        "memoryGuardLevel": "NORMAL",
+        "loginStatus": 401,
+        "validSessionAvailable": false,
+        "outputSafetyConfirmed": false,
+        "flashAttempted": false
+      },
+      "requiredBeforeWrite": [
+        "active bootloader chip/MAC/16MiB Flash confirmation",
+        "current partition layout and active OTA slot",
+        "fresh same-device configuration backup and verification",
+        "MCP service and OAuth test environment",
+        "explicit write authorization for this device"
+      ]
+    },
+    {
+      "environment": "esp32-F4R0",
+      "port": "COM16",
+      "expectedMacSuffix": "D4:E9:F4:B1:6C:34",
+      "discoveredStaAddress": null,
+      "status": "NOT_DISCOVERED_RECENTLY_SERIAL_RECHECK_REQUIRED",
+      "requiredBeforeWrite": [
+        "active bootloader chip/MAC/4MiB Flash confirmation",
+        "new 0x340000 app / 0x350000 filesystem layout compatibility",
+        "fresh same-device configuration backup and verification",
+        "complete firmware and filesystem upgrade path",
+        "explicit write authorization for this device"
+      ]
+    }
+  ],
+  "requiredLocalEvidence": [
+    "firmware and Web artifact SHA-256",
+    "MCP initialize/tools/list/resources/prompts structured responses",
+    "device capabilities and section-scoped snapshot",
+    "typed peripheral draft and device preflight",
+    "human confirmation bound to draftHash and baseRevision",
+    "accepted/persisted/readback states with matching draftId/operationId",
+    "text document upload with exact Origin CORS",
+    "session refresh recovery without a new pairing code",
+    "no secret in model context, logs, audit or URLs"
+  ],
+  "pendingEnvironments": {
+    "realOauthIssuerAndJwks": "PENDING",
+    "realMySqlRedisFlyway": "PENDING",
+    "dockerAndNginxLongConnections": "PENDING",
+    "realModbusAndMqttTraffic": "PENDING",
+    "physicalEvidence": "PENDING_SEPARATE_AUTHORIZATION",
+    "longTerm8h24h72h": "PENDING_SEPARATE_AUTHORIZATION"
+  },
+  "stopRules": [
+    "Do not flash or modify a device whose current identity, partitions or backup cannot be verified.",
+    "Do not use public redacted examples as a live configuration backup.",
+    "Do not automatically replay UNKNOWN writes, reset outputs or perform OTA/restart/factory reset for MCP acceptance.",
+    "Do not report local, mock, build or offline browser evidence as device API, physical or long-term acceptance."
+  ]
+}

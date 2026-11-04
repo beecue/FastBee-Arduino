@@ -15,6 +15,10 @@
 #define FASTBEE_ENABLE_AI 0
 #endif
 
+#ifndef FASTBEE_ENABLE_MCP_CONFIG
+#define FASTBEE_ENABLE_MCP_CONFIG 1
+#endif
+
 // Device screens are supported on ESP32-S3. Host tests retain the generic
 // model; production targets explicitly set these capabilities in platformio.ini.
 // Runtime enablement is independent: buffers are allocated only when enabled.

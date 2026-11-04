@@ -53,10 +53,34 @@ bool AiConfigStore::validateProvider(const AiConfig& config, String& error) {
     return true;
 }
 
+bool validLoopbackHttpUrl(const String& value) {
+    if (value.length() > 256 || !value.startsWith("http://") ||
+        value.indexOf('@') >= 0 || value.indexOf('?') >= 0 || value.indexOf('#') >= 0 ||
+        value.indexOf(' ') >= 0 || value.indexOf('\r') >= 0 || value.indexOf('\n') >= 0) {
+        return false;
+    }
+    String rest = value.substring(7);
+    while (rest.endsWith("/")) rest = rest.substring(0, rest.length() - 1);
+    const int slash = rest.indexOf('/');
+    const String authority = slash < 0 ? rest : rest.substring(0, slash);
+    if (slash >= 0 && rest.substring(slash) != "/") return false;
+    const int colon = authority.lastIndexOf(':');
+    const String host = colon < 0 ? authority : authority.substring(0, colon);
+    if (host != "127.0.0.1" && host != "localhost") return false;
+    if (colon < 0) return true;
+    const String port = authority.substring(colon + 1);
+    if (port.isEmpty()) return false;
+    for (size_t i = 0; i < port.length(); ++i) {
+        if (!isdigit(static_cast<unsigned char>(port[i]))) return false;
+    }
+    const long number = port.toInt();
+    return number >= 1 && number <= 65535;
+}
+
 bool AiConfigStore::validateMcpBaseUrl(const String& baseUrl, String& error) {
     error = "";
     if (baseUrl.isEmpty()) return true;
-    return validHttpsUrl(baseUrl, false, error);
+    return validHttpsUrl(baseUrl, false, error) || validLoopbackHttpUrl(baseUrl);
 }
 
 void AiConfigStore::writePublicJson(const AiConfig& config, JsonObject output,

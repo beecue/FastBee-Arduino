@@ -1,6 +1,7 @@
 #include "core/FeatureFlags.h"
 #if FASTBEE_ENABLE_AI || defined(UNIT_TEST)
 #include "protocols/AiProviderClient.h"
+#include "core/AiMcpToolBridge.h"
 
 #include <cstring>
 #include <limits>
@@ -294,7 +295,10 @@ bool AiProviderClient::buildRequest(const AiProviderRequest& request, JsonDocume
         tool["type"] = "function";
         tool["function"]["name"] = name;
         tool["function"]["description"] = "Call the named read-only or draft MCP tool through the browser";
-        tool["function"]["parameters"]["type"] = "object";
+        if (!AiMcpToolBridge::writeToolSchema(name, tool["function"]["parameters"].to<JsonObject>())) {
+            error = "AI_UNSUPPORTED_TOOL";
+            return false;
+        }
     }
     error = "";
     return !output.overflowed();

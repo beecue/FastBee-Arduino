@@ -50,7 +50,7 @@ export default defineConfig({
   webServer: {
     command: 'node offline-ui-server.mjs',
     url: `${baseURL}/api/health`,
-    timeout: 120_000,
+    timeout: Number(process.env.OFFLINE_UI_START_TIMEOUT_MS || 120_000),
     reuseExistingServer: false,
   },
   use: {

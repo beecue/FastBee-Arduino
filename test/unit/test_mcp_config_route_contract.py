@@ -142,7 +142,7 @@ class McpConfigRouteContractTests(unittest.TestCase):
         checks = {entry["name"]: entry for entry in matrix["checks"]}
         for name, method, path in (
             ("mcp-capabilities", "GET", "/api/mcp/capabilities"),
-            ("mcp-config-snapshot", "GET", "/api/mcp/config/snapshot"),
+            ("mcp-config-snapshot", "GET", "/api/mcp/config/snapshot?sections=peripherals"),
         ):
             self.assertEqual(method, checks[name]["method"])
             self.assertEqual(path, checks[name]["path"])
@@ -170,6 +170,52 @@ class McpConfigRouteContractTests(unittest.TestCase):
         # 网络与 AI Key 保持只读
         self.assertIn('StorageSectionAdapter("network", FileSystem::NETWORK_CONFIG_FILE, true', source)
         self.assertIn('StorageSectionAdapter("aiKey", "", true', source)
+
+    def test_mcp_compile_capability_is_independent_from_ai(self):
+        flags = read(ROOT / "include/core/FeatureFlags.h")
+        self.assertIn("FASTBEE_ENABLE_MCP_CONFIG", flags)
+        web = read(ROOT / "src/network/WebConfigManager.cpp")
+        self.assertIn("#if FASTBEE_ENABLE_MCP_CONFIG", web)
+        profile = read(ROOT / "scripts/web-profile.js")
+        self.assertIn("mcpConfigBridge: 'FASTBEE_ENABLE_MCP_CONFIG'", profile)
+        matrix = json.loads(read(ROOT / "scripts/device-api-test-matrix.json"))
+        checks = {entry["name"]: entry for entry in matrix["checks"]}
+        self.assertEqual("/api/mcp/config/snapshot?sections=peripherals", checks["mcp-config-snapshot"]["path"])
+        for name, method, path in (
+            ("mcp-config-preflight", "POST", "/api/mcp/config/preflight"),
+            ("mcp-config-readback", "POST", "/api/mcp/config/readback"),
+        ):
+            self.assertEqual(method, checks[name]["method"])
+            self.assertEqual(path, checks[name]["path"])
+            self.assertTrue(checks[name]["skipSoak"])
+
+    def test_capabilities_publish_real_request_and_result_limits(self):
+        source = read(SERVICE_CPP)
+        capabilities = function_body(source, r"ManagedConfigApplyService::capabilities\s*\(")
+        self.assertIn("maxApplyBodyBytes", capabilities)
+        self.assertIn("maxSnapshotResultBytes", capabilities)
+        self.assertIn("maxOperations", capabilities)
+        self.assertIn("kMaxRequestBodyBytes", read(SERVICE_H))
+
+    def test_internal_uncompiled_feature_intent_does_not_block_unrelated_config(self):
+        service = read(SERVICE_CPP)
+        self.assertRegex(service, r"enabled[^\n]*&&[^\n]*metadata->displayName[^\n]*&&\s*!metadata->compiled")
+        migration = read(ROOT / "src/systems/ConfigMigrationValidation.cpp")
+        self.assertIn("feature->displayName && !feature->compiled", migration)
+
+    def test_legacy_screen_panel_without_touch_migration_remains_readable(self):
+        migration = read(ROOT / "src/systems/ConfigMigrationValidation.cpp")
+        self.assertRegex(migration, r'!document\["touchUiMigration"\]\.isNull\(\)\s*&&\s*document\["touchUiMigration"\]\s*!=\s*2')
+
+    def test_digital_input_is_a_valid_event_source_without_sampling_action(self):
+        migration = read(ROOT / "src/systems/ConfigMigrationValidation.cpp")
+        trigger_source = function_body(migration, r"bool triggerSource\(const String& ref\)const")
+        self.assertIn("isGpioDigitalInputType", trigger_source)
+        self.assertIn("enabled", trigger_source)
+
+    def test_legacy_null_rule_script_list_is_an_empty_collection(self):
+        migration = read(ROOT / "src/systems/ConfigMigrationValidation.cpp")
+        self.assertIn('document.size()==1&&document["rules"].isNull()', migration)
 
     def test_mqtt_test_route_is_bounded_and_uses_production_lifecycle(self):
         handler = read(HANDLER_CPP)

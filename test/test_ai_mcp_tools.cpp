@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <chrono>
 #include <deque>
+#include <fstream>
 #include <thread>
 
 #include "core/AiMcpToolBridge.h"
@@ -10,6 +11,43 @@
 #include "../src/core/AiMcpToolBridge.cpp"
 
 namespace {
+
+bool jsonEqual(JsonVariantConst left, JsonVariantConst right) {
+    if (left.is<JsonObjectConst>() || right.is<JsonObjectConst>()) {
+        if (!left.is<JsonObjectConst>() || !right.is<JsonObjectConst>()) return false;
+        JsonObjectConst leftObject = left.as<JsonObjectConst>();
+        JsonObjectConst rightObject = right.as<JsonObjectConst>();
+        if (leftObject.size() != rightObject.size()) return false;
+        for (JsonPairConst pair : leftObject) {
+            if (rightObject[pair.key().c_str()].isNull() || !jsonEqual(pair.value(), rightObject[pair.key().c_str()])) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (left.is<JsonArrayConst>() || right.is<JsonArrayConst>()) {
+        if (!left.is<JsonArrayConst>() || !right.is<JsonArrayConst>()) return false;
+        JsonArrayConst leftArray = left.as<JsonArrayConst>();
+        JsonArrayConst rightArray = right.as<JsonArrayConst>();
+        if (leftArray.size() != rightArray.size()) return false;
+        for (size_t i = 0; i < leftArray.size(); ++i) {
+            if (!jsonEqual(leftArray[i], rightArray[i])) return false;
+        }
+        return true;
+    }
+    if (left.isNull() || right.isNull()) return left.isNull() == right.isNull();
+    return left == right;
+}
+
+void test_peripheral_schema_matches_shared_fixture() {
+    std::ifstream input("test/fixtures/mcp/device-ai-tools-v1.json");
+    TEST_ASSERT_TRUE(input.good());
+    JsonDocument fixture;
+    TEST_ASSERT_FALSE(deserializeJson(fixture, input));
+    JsonDocument generated;
+    TEST_ASSERT_TRUE(AiMcpToolBridge::writeToolSchema("upsert_peripheral", generated.to<JsonObject>()));
+    TEST_ASSERT_TRUE(jsonEqual(fixture["tools"]["upsert_peripheral"]["inputSchema"], generated.as<JsonVariantConst>()));
+}
 
 class FakeMcpTransport : public AiProviderTransport {
 public:
@@ -74,6 +112,64 @@ void test_catalog_is_pruned_and_arguments_are_strict() {
     TEST_ASSERT_FALSE(AiMcpToolBridge::validateCall("upsert_peripheral", args.as<JsonVariantConst>(), error));
     deserializeJson(args, "{\"draftId\":\"d-1\",\"expectedVersion\":1,\"peripheral\":{\"name\":\"relay\",\"type\":12,\"pins\":[4],\"pinCount\":2}}");
     TEST_ASSERT_FALSE(AiMcpToolBridge::validateCall("upsert_peripheral", args.as<JsonVariantConst>(), error));
+}
+
+void test_cloud_schema_and_initial_draft_version_are_compatible() {
+    String error;
+    JsonDocument args;
+    deserializeJson(args, "{\"draftId\":\"d-1\",\"expectedVersion\":0,\"peripheral\":{\"name\":\"relay\",\"type\":12,\"pins\":[4]}}");
+    TEST_ASSERT_TRUE(AiMcpToolBridge::validateCall("upsert_peripheral", args.as<JsonVariantConst>(), error));
+
+    JsonDocument schema;
+    TEST_ASSERT_TRUE(AiMcpToolBridge::writeToolSchema("search_documents", schema.to<JsonObject>()));
+    TEST_ASSERT_EQUAL(false, schema["additionalProperties"].as<bool>());
+    TEST_ASSERT_TRUE(schema["properties"]["query"].is<JsonObject>());
+    TEST_ASSERT_TRUE(schema["properties"]["limit"].is<JsonObject>());
+    TEST_ASSERT_TRUE(schema["properties"]["cursor"].is<JsonObject>());
+    TEST_ASSERT_FALSE(schema["properties"]["page"].is<JsonObject>());
+    TEST_ASSERT_FALSE(schema["properties"]["pageSize"].is<JsonObject>());
+    TEST_ASSERT_TRUE(schema["required"][0].is<const char*>());
+    TEST_ASSERT_FALSE(AiMcpToolBridge::writeToolSchema("apply_configuration_draft", schema.to<JsonObject>()));
+}
+
+void test_all_safe_configuration_domains_have_strict_schemas() {
+    const char* names[] = {
+        "get_device_config_section", "get_device_status", "update_device_profile", "configure_runtime_features",
+        "upsert_execution_rule", "remove_execution_rule", "dry_run_execution_rule",
+        "upsert_rule_script", "remove_rule_script", "configure_modbus_rtu", "upsert_modbus_device",
+        "remove_modbus_device", "upsert_modbus_poll_task", "remove_modbus_poll_task", "configure_mqtt",
+        "upsert_mqtt_topic", "remove_mqtt_topic", "preview_configuration_draft", "refresh_device_capabilities",
+        "list_workflow_templates", "start_configuration_workflow", "get_workflow_run", "cancel_workflow_run",
+        "parse_document", "retry_document_parsing", "get_operation_audit", "submit_feedback"
+    };
+    for (const char* name : names) {
+        TEST_ASSERT_TRUE(AiMcpToolBridge::isAllowed(name));
+        JsonDocument schema;
+        TEST_ASSERT_TRUE(AiMcpToolBridge::writeToolSchema(name, schema.to<JsonObject>()));
+        TEST_ASSERT_EQUAL(false, schema["additionalProperties"].as<bool>());
+        TEST_ASSERT_TRUE(schema["properties"].is<JsonObject>());
+    }
+    TEST_ASSERT_FALSE(AiMcpToolBridge::isAllowed("apply_configuration_draft"));
+    TEST_ASSERT_FALSE(AiMcpToolBridge::isAllowed("rollback_configuration_operation"));
+    TEST_ASSERT_FALSE(AiMcpToolBridge::isAllowed("set_execution_rule_enabled"));
+    TEST_ASSERT_FALSE(AiMcpToolBridge::isAllowed("set_rule_script_enabled"));
+    TEST_ASSERT_FALSE(AiMcpToolBridge::isAllowed("test_mqtt_configuration"));
+    TEST_ASSERT_FALSE(AiMcpToolBridge::isAllowed("delete_document"));
+
+    String error;
+    JsonDocument args;
+    deserializeJson(args, "{\"section\":\"protocol\"}");
+    TEST_ASSERT_TRUE(AiMcpToolBridge::validateCall("get_device_config_section", args.as<JsonVariantConst>(), error));
+    deserializeJson(args, "{\"draftId\":\"d\",\"expectedVersion\":0,\"bus\":{\"enabled\":true,\"mode\":\"master\",\"peripheralId\":\"uart1\",\"dePin\":4,\"transferType\":0,\"baudRate\":9600}}");
+    TEST_ASSERT_TRUE(AiMcpToolBridge::validateCall("configure_modbus_rtu", args.as<JsonVariantConst>(), error));
+    deserializeJson(args, "{\"draftId\":\"d\",\"expectedVersion\":0,\"taskIndex\":0,\"task\":{\"slaveAddress\":1,\"functionCode\":3,\"startAddressText\":\"40001\",\"quantity\":1,\"pollInterval\":30,\"mappings\":[{\"regOffset\":0,\"dataType\":\"uint16\",\"wordOrder\":0,\"byteOrder\":\"bigEndian\",\"scaleFactor\":0.1,\"unit\":\"C\"}]}}");
+    TEST_ASSERT_TRUE(AiMcpToolBridge::validateCall("upsert_modbus_poll_task", args.as<JsonVariantConst>(), error));
+    deserializeJson(args, "{\"draftId\":\"d\",\"expectedVersion\":0,\"connection\":{\"scheme\":\"mqtts\",\"server\":\"broker.example\",\"port\":8883,\"secretRef\":\"protocol.mqtt.password\"}}");
+    TEST_ASSERT_TRUE(AiMcpToolBridge::validateCall("configure_mqtt", args.as<JsonVariantConst>(), error));
+    deserializeJson(args, "{\"draftId\":\"d\",\"expectedVersion\":0,\"connection\":{\"password\":\"secret\"}}");
+    TEST_ASSERT_FALSE(AiMcpToolBridge::validateCall("configure_mqtt", args.as<JsonVariantConst>(), error));
+    deserializeJson(args, "{\"templateId\":\"mqtt_reporting_setup\",\"input\":{\"deviceId\":\"dev-1\"}}");
+    TEST_ASSERT_TRUE(AiMcpToolBridge::validateCall("start_configuration_workflow", args.as<JsonVariantConst>(), error));
 }
 
 void test_single_awaiting_tool_roundtrip_and_stale_result_rejection() {
@@ -182,7 +278,10 @@ void test_cloud_timeout_and_cancellation_never_retry_or_apply() {
 } // namespace
 
 void test_ai_mcp_tools_group() {
+    RUN_TEST(test_peripheral_schema_matches_shared_fixture);
     RUN_TEST(test_catalog_is_pruned_and_arguments_are_strict);
+    RUN_TEST(test_cloud_schema_and_initial_draft_version_are_compatible);
+    RUN_TEST(test_all_safe_configuration_domains_have_strict_schemas);
     RUN_TEST(test_single_awaiting_tool_roundtrip_and_stale_result_rejection);
     RUN_TEST(test_max_eight_iterations_and_unknown_extra_fields_fail_closed);
     RUN_TEST(test_cloud_timeout_and_cancellation_never_retry_or_apply);

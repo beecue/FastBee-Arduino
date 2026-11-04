@@ -4,7 +4,9 @@
     var activeJob = null;
     var activeProposal = null;
     var activeToolJob = null;
+    var activeDraftId = '';
     var mcpReady = false;
+    var mcpState = 'MCP_UNPAIRED';
     var documentContext = '';
     var leaving = false;
     var pollTimer = null;
@@ -19,6 +21,22 @@
         if (!element) return;
         element.textContent = text || '';
         element.classList.toggle('ai-error', !!error);
+    }
+    function setMcpState(state, detail) {
+        mcpState = state;
+        var labels = {
+            AI_INACTIVE: 'AI 助手未启用', PROVIDER_REQUIRED: '请先配置模型', MCP_UNPAIRED: 'MCP 未配对',
+            CONNECTING: 'MCP 连接中', CONNECTOR_ONLINE: '连接器已在线，正在验证 MCP', MCP_READY: 'MCP 已就绪',
+            DEGRADED: 'MCP 降级，本地 AI 仍可用', SESSION_EXPIRED: 'MCP 会话已过期'
+        };
+        setStatus('ai-mcp-state', labels[state] || state, state === 'DEGRADED' || state === 'SESSION_EXPIRED');
+        setStatus('ai-mcp-state-detail', detail || '', state === 'DEGRADED' || state === 'SESSION_EXPIRED');
+    }
+    function setMcpReady(ready) {
+        mcpReady = ready === true;
+        ['ai-document-file', 'ai-document-upload', 'ai-doc-search'].forEach(function (id) {
+            if (byId(id)) byId(id).disabled = !mcpReady;
+        });
     }
     function show(id, visible) {
         var element = byId(id);
@@ -47,6 +65,15 @@
         var target = byId('ai-tool-results');
         if (!target) return;
         target.textContent = '';
+        if (result.draftId) activeDraftId = result.draftId;
+        if (result.draftHash || result.baseRevision || result.pendingRestart === true) {
+            var metadata = document.createElement('p');
+            metadata.textContent = '草案：' + activeDraftId +
+                (result.draftHash ? '；draftHash=' + result.draftHash : '') +
+                (result.baseRevision ? '；baseRevision=' + result.baseRevision : '') +
+                (result.pendingRestart === true ? '；保存后需要重启，不会自动重启' : '');
+            target.appendChild(metadata);
+        }
         var citations = result.citations || (result.items || []).map(function (item) { return item.citation; }).filter(Boolean);
         if (citations.length) {
             var sources = document.createElement('p');
@@ -99,11 +126,9 @@
         activeJob = null;
         activeProposal = null;
         activeToolJob = null;
-        mcpReady = false;
+        activeDraftId = '';
+        setMcpReady(false);
         if (window.FastBeeAiMcpTools) FastBeeAiMcpTools.cancelAll();
-        ['ai-document-file', 'ai-document-upload', 'ai-doc-search'].forEach(function (id) {
-            if (byId(id)) byId(id).disabled = true;
-        });
         show('ai-proposal', false);
         show('ai-execution-result', false);
         if (byId('ai-cancel')) byId('ai-cancel').disabled = true;
@@ -121,38 +146,122 @@
         var active = latestConfig.active === true;
         ['ai-message', 'ai-send'].forEach(function (id) { if (byId(id)) byId(id).disabled = !active; });
         show('ai-feature-hint', !active);
+        if (!active) setMcpState('AI_INACTIVE', '请先在功能配置中启用 AI 助手；MCP 配置会保留。');
+        else if (latestConfig.apiKeyConfigured !== true) {
+            setMcpState('PROVIDER_REQUIRED', '请先保存模型地址、模型名称和 API Key。');
+        }
+    }
+    function confirmMcpRequest(request) {
+        return Promise.resolve(window.confirm((request.message || '确认应用配置？') + '\n风险：' + (request.risk || '请核对差异')));
+    }
+    function resumeMcp(deviceId, cloudBase) {
+        setMcpReady(false);
+        setMcpState('CONNECTING', '正在初始化协议并核验 OAuth、工具目录和设备能力。');
+        return FastBeeAiMcpTools.resume({ cloudBase: cloudBase, deviceId: deviceId,
+            getBaseRevision: FastBeeAiMcpConnector.readGlobalRevision, confirm: confirmMcpRequest })
+            .then(function () {
+                setMcpReady(true);
+                setMcpState('MCP_READY', 'OAuth、连接器和设备能力均已验证；文档按云端状态可用。');
+                byId('ai-document-upload').textContent = '上传文档';
+                setStatus('ai-config-status', 'MCP 已连接；令牌仅保留在当前浏览器会话中。');
+                return true;
+            }).catch(function (error) {
+                setMcpReady(false);
+                var expired = /UNAUTHENTICATED|EXPIRED|REVOKED/.test(error.message || '');
+                setMcpState(expired ? 'SESSION_EXPIRED' : 'DEGRADED',
+                    'MCP 初始化未完成：' + error.message + '；本地 AI 不受影响。');
+                throw error;
+            });
+    }
+    function restoreMcp() {
+        if (!window.FastBeeAiMcpConnector || !window.FastBeeAiMcpTools) return Promise.resolve(false);
+        var connector = FastBeeAiMcpConnector.status();
+        if (!connector.paired || !connector.deviceId) {
+            setMcpState('MCP_UNPAIRED', '填写 MCP 地址、OAuth 令牌和一次性配对码后开始。');
+            return Promise.resolve(false);
+        }
+        FastBeeAiMcpConnector.start();
+        return resumeMcp(connector.deviceId, connector.cloudBase || latestConfig.mcpBaseUrl)
+            .catch(function () { return false; });
+    }
+    function beginOAuthFlow() {
+        var redirectUri = window.location.href.split(/[?#]/)[0];
+        FastBeeAiMcpTools.beginOAuth({
+            authorizationEndpoint: byId('ai-oauth-authorize').value,
+            tokenEndpoint: byId('ai-oauth-token-endpoint').value,
+            clientId: byId('ai-oauth-client-id').value,
+            redirectUri: redirectUri,
+            allowedRedirects: [redirectUri],
+            scopes: ['fastbee.read', 'fastbee.documents', 'fastbee.configure']
+        }).then(function (authorization) {
+            window.location.assign(authorization.url);
+        }).catch(function (error) {
+            setMcpState('DEGRADED', 'PKCE 授权无法启动：' + error.message + '；可改用短期 OAuth 令牌。');
+        });
+    }
+    function completeOAuthIfNeeded() {
+        var params = new URLSearchParams(window.location.search);
+        if (!params.get('code') || !params.get('state')) return Promise.resolve(false);
+        return FastBeeAiMcpTools.completeOAuth({ code: params.get('code'), state: params.get('state') })
+            .then(function () {
+                var clean = window.location.href.split(/[?#]/)[0];
+                window.history.replaceState({}, document.title, clean);
+                return true;
+            });
     }
     function prepareMcp() {
-        if (!latestConfig.mcpBaseUrl || typeof ModuleLoader === 'undefined') return;
+        if (typeof ModuleLoader === 'undefined') return;
         ModuleLoader.loadModule('ai-mcp', function () {
-            setStatus('ai-config-status', 'MCP 模块已就绪；配对前本地模型仍可独立使用。');
+            completeOAuthIfNeeded().catch(function (error) {
+                setMcpState('DEGRADED', 'OAuth 回调处理失败：' + error.message + '；已有连接器会话不受影响。');
+            }).then(function () { restoreMcp(); });
         });
     }
     function connectMcp() {
         var url = byId('ai-mcp-url').value;
         var token = byId('ai-oauth-token').value;
         var code = byId('ai-pair-code').value;
-        if (!url || !token || !code || !window.FastBeeAiMcpConnector || !window.FastBeeAiMcpTools) {
-            setStatus('ai-config-status', '请填写 MCP 地址、OAuth 令牌和一次性配对码。', true);
+        if (!url || !token || !window.FastBeeAiMcpConnector || !window.FastBeeAiMcpTools) {
+            setMcpState('MCP_UNPAIRED', '请填写 MCP 地址和 OAuth 令牌。');
+            return;
+        }
+        var connector = FastBeeAiMcpConnector.status();
+        if (connector.paired && connector.deviceId && connector.cloudBase === url) {
+            byId('ai-mcp-connect').disabled = true;
+            FastBeeAiMcpTools.configure({ cloudBase: url, oauthToken: token, deviceId: connector.deviceId,
+                getBaseRevision: FastBeeAiMcpConnector.readGlobalRevision, confirm: confirmMcpRequest });
+            FastBeeAiMcpConnector.start();
+            resumeMcp(connector.deviceId, url).then(function () {
+                byId('ai-pair-code').value = '';
+                byId('ai-oauth-token').value = '';
+            }).catch(function () {
+                setMcpReady(false);
+            }).finally(function () { byId('ai-mcp-connect').disabled = false; });
+            return;
+        }
+        if (!code) {
+            setMcpState('MCP_UNPAIRED', '首次配对或变更 MCP 地址时需要一次性配对码。');
             return;
         }
         byId('ai-mcp-connect').disabled = true;
         FastBeeAiMcpConnector.pair(url, code).then(function (paired) {
             if (!paired || paired.ok !== true) throw new Error((paired && paired.error) || 'MCP_PAIR_FAILED');
-            FastBeeAiMcpTools.configure({ cloudBase: url, oauthToken: token, confirm: function (request) {
-                return Promise.resolve(window.confirm((request.message || '确认应用配置？') + '\n风险：' + (request.risk || '请核对差异')));
-            } });
             FastBeeAiMcpConnector.start();
-            mcpReady = true;
+            setMcpState('CONNECTOR_ONLINE', '设备配对已完成，正在验证 MCP 会话。');
+            FastBeeAiMcpTools.configure({ cloudBase: url, oauthToken: token, deviceId: paired.deviceId,
+                getBaseRevision: FastBeeAiMcpConnector.readGlobalRevision, confirm: confirmMcpRequest });
             byId('ai-pair-code').value = '';
             byId('ai-oauth-token').value = '';
-            ['ai-document-file', 'ai-document-upload', 'ai-doc-search'].forEach(function (id) { byId(id).disabled = false; });
-            byId('ai-document-upload').textContent = '上传文档';
-            setStatus('ai-config-status', 'MCP 已连接；令牌仅保留在浏览器会话中。');
-        }).catch(function (error) {
-            mcpReady = false;
-            setStatus('ai-config-status', 'MCP 连接失败；本地 AI 不受影响：' + error.message, true);
+            return resumeMcp(paired.deviceId, url);
+        }).catch(function () {
+            setMcpReady(false);
         }).finally(function () { byId('ai-mcp-connect').disabled = false; });
+    }
+    function disconnectMcp() {
+        if (window.FastBeeAiMcpConnector) FastBeeAiMcpConnector.revoke();
+        if (window.FastBeeAiMcpTools) FastBeeAiMcpTools.disconnect();
+        setMcpReady(false);
+        setMcpState('MCP_UNPAIRED', '会话已断开；重新配对后可再次连接。');
     }
     function loadConfig() {
         return apiGet('/api/ai/config').then(unwrap).then(function (config) {
@@ -268,6 +377,31 @@
         apiPost('/api/ai/jobs/' + encodeURIComponent(jobId) + '/cancel', {}).catch(function () {});
         setStatus('ai-chat-status', '已请求取消；网络请求可能仍需等待超时结束。');
     }
+    function submitMqttSecret() {
+        if (!mcpReady || !window.FastBeeAiMcpConnector) return;
+        var value = byId('ai-secret-value').value;
+        var secretRef = byId('ai-secret-ref').value;
+        var key = 'web-secret-' + Date.now() + '-' + Math.random().toString(36).slice(2, 12);
+        byId('ai-secret-submit').disabled = true;
+        FastBeeAiMcpConnector.submitSecret(secretRef, value, key).then(function () {
+            byId('ai-secret-value').value = '';
+            setStatus('ai-config-status', '秘密已仅提交到设备接口；云端和模型未接收该值。');
+        }).catch(function (error) {
+            setStatus('ai-config-status', '秘密提交失败：' + error.message, true);
+        }).finally(function () { byId('ai-secret-submit').disabled = false; });
+    }
+    function testMqtt() {
+        if (!mcpReady || !activeDraftId) {
+            setStatus('ai-config-status', '请先让 AI 生成并预检一个 MQTT 配置草案。', true);
+            return;
+        }
+        byId('ai-mqtt-test').disabled = true;
+        FastBeeAiMcpTools.testMqttConfiguration(activeDraftId, { humanConfirmed: true }).then(function (result) {
+            setStatus('ai-config-status', result.connected === true ? 'MQTT 单次连接测试成功。' : 'MQTT 连接测试未连接；请核对状态。', result.connected !== true);
+        }).catch(function (error) {
+            setStatus('ai-config-status', 'MQTT 测试失败：' + error.message, true);
+        }).finally(function () { byId('ai-mqtt-test').disabled = false; });
+    }
     function bind() {
         document.querySelectorAll('[data-ai-tab]').forEach(function (button) {
             button.addEventListener('click', function () { selectTab(button.getAttribute('data-ai-tab')); });
@@ -275,6 +409,11 @@
         byId('ai-send').addEventListener('click', send);
         byId('ai-cancel').addEventListener('click', cancel);
         byId('ai-mcp-connect').addEventListener('click', connectMcp);
+        byId('ai-oauth-begin').addEventListener('click', beginOAuthFlow);
+        byId('ai-mcp-resume').addEventListener('click', function () { restoreMcp(); });
+        byId('ai-mcp-disconnect').addEventListener('click', disconnectMcp);
+        byId('ai-secret-submit').addEventListener('click', submitMqttSecret);
+        byId('ai-mqtt-test').addEventListener('click', testMqtt);
         byId('ai-document-upload').addEventListener('click', function () {
             var file = byId('ai-document-file').files[0];
             if (!mcpReady || !file) return;

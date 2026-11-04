@@ -28,10 +28,13 @@
 - 工具结果最大 16 KiB，错误码最大 128 字节。浏览器调用 `POST /api/ai/jobs/{jobId}/tool-result`，正文只能包含 `toolCallId` 以及恰好一个非空 `result` 或 `error`。
 - 设备同时校验认证会话、`jobId`、当前 `awaiting_tool` 状态和精确 `toolCallId`。跨会话、重复、迟到、取消后的结果统一拒绝为 `AI_STALE_TOOL_RESULT`。
 - 云端超时、工具错误、未知工具、额外参数或超限结果不自动重试。取消和离页只表示已请求取消，不伪称 TLS 已立即停止。
+- 浏览器首次调用前完成 `initialize` 与 `notifications/initialized`，后续请求携带 `Mcp-Session-Id` 和 `MCP-Protocol-Version: 2025-06-18`；响应同时支持 JSON 与单个 JSON-RPC 消息的 `text/event-stream`，无法取得会话或响应畸形时失败关闭，不自动重放工具写操作。
+- 页面刷新时使用当前 tab 的 `sessionStorage` 恢复连接器和 OAuth 会话，并重新完成 `tools/list` 与设备能力验证后才进入 `MCP_READY`。配对成功只表示连接器在线，不代表 MCP 已就绪；OAuth 失效时清除对应会话，网络/CORS 临时失败允许用户主动重试。
+- 模型参数不包含配对上下文。浏览器为设备工具注入已配对 `deviceId`，创建草案前通过 `device.config.revision.read` 获取并注入 `baseRevision`；文档上传字段为 `fileName/sizeBytes/sha256/deviceId`，分页字段统一为 `cursor/limit`。标准 `CallToolResult` 先解包 `structuredContent` 或单个文本 JSON content，`isError=true` 一律失败关闭。
 
-模型可用目录仅限：`get_device_capabilities`、`list_peripherals`、`read_peripheral`、`list_execution_rules`、`list_rule_scripts`、`get_protocol_configuration`、`get_configuration_history`、`create_config_draft`、`get_configuration_draft`、`upsert_peripheral`、`remove_peripheral`、`set_peripheral_enabled`、`validate_configuration_draft`、`get_configuration_operation`、`request_document_upload`、`list_documents`、`get_document_status`、`search_documents`、`extract_configuration_facts`。所有参数对象均 `additionalProperties=false`，并按工具校验必填字段、类型和上限。
+模型可用目录按安全配置域限定：设备/外设只读与外设草案、外设执行、规则脚本、Modbus RTU、MQTT 非秘密配置、运行时功能、设备资料、文档上传/检索/解析和固定工作流。所有参数对象均 `additionalProperties=false`，并按工具校验必填字段、类型和上限。设备上下文只允许由配对浏览器注入，模型不能切换到其他设备。
 
-`apply_configuration_draft` 明确不在模型目录中。草案编辑和预检不产生设备写。
+`apply_configuration_draft`、`rollback_configuration_operation`、规则/脚本启用、MQTT 连接测试和文档删除明确不在模型目录中。草案编辑和预检不产生设备写；这些操作只能经独立可信按钮和 `elicitation/create` 完成。MQTT 秘密值只通过 `/api/mcp/secrets/{secretRef}` 直送设备，模型与云端只见 `secretRef/secretConfigured`，单次连接测试另有独立人类确认。
 
 ## 人类确认与可信应用
 

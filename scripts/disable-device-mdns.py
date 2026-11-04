@@ -28,7 +28,7 @@ TARGETS = {
 }
 CONFIG_KEYS = {'config/network.json': ('enableMDNS',),
                'config/features.json': ('features', 'mdns', 'enabled')}
-FLASH_BYTES, FS_OFFSET, FS_BYTES = 0x400000, 0x340000, 0xC0000
+FLASH_BYTES, FS_OFFSET, FS_BYTES = 0x400000, 0x350000, 0x0B0000
 
 
 def require(condition, message):

@@ -1045,8 +1045,8 @@
         Notification.error(message, title || '请求失败');
     };
 
-    window.apiGet = function (url, params) {
-        return Governor.enqueue('GET', url, { params: params || {} });
+    window.apiGet = function (url, params, timeoutMs) {
+        return Governor.enqueue('GET', url, { params: params || {} }, timeoutMs);
     };
 
     window.apiGetSilent = function (url, params) {
@@ -1090,11 +1090,11 @@
         });
     };
 
-    window.apiPostJson = function (url, data) {
+    window.apiPostJson = function (url, data, timeoutMs) {
         return Governor.enqueue('POST', url, {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data || {})
-        });
+        }, timeoutMs);
     };
 
     window.apiDelete = function (url, params) {

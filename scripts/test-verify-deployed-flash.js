@@ -26,9 +26,9 @@ expect(/\[ValidateRange\(9600,\s*2000000\)\][\s\S]*\[int\]\$Baud\s*=\s*460800/,
 const targetContracts = [
     ['esp32s3-F16R8', 'COM15', 'esp32s3', '0x1000000', '0xE10000', '0x1F0000'],
     ['esp32s3-F16R8', 'COM9', 'esp32s3', '0x1000000', '0xE10000', '0x1F0000'],
-    ['esp32c3-F4R0', 'COM4', 'esp32c3', '0x400000', '0x340000', '0x0C0000'],
-    ['esp32c6-F4R0', 'COM11', 'esp32c6', '0x400000', '0x340000', '0x0C0000'],
-    ['esp32-F4R0', 'COM16', 'esp32', '0x400000', '0x340000', '0x0C0000'],
+    ['esp32c3-F4R0', 'COM4', 'esp32c3', '0x400000', '0x350000', '0x0B0000'],
+    ['esp32c6-F4R0', 'COM11', 'esp32c6', '0x400000', '0x350000', '0x0B0000'],
+    ['esp32-F4R0', 'COM16', 'esp32', '0x400000', '0x350000', '0x0B0000'],
     ['esp32s3-F8R0', 'COM7', 'esp32s3', '0x800000', '0x710000', '0x0F0000']
 ];
 for (const [environment, port, chip, flashSize, offset, size] of targetContracts) {
@@ -327,9 +327,9 @@ try {
 $catalog = @(
     [pscustomobject]@{ Device='S3'; Environment='esp32s3-F16R8'; Port='COM15'; Chip='esp32s3'; FlashSize=0x1000000; AppOffset=0x10000; AppSize=0x700000; FsOffset=0xE10000; FsSize=0x1F0000; VariantPolicy='canonical' },
     [pscustomobject]@{ Device='Touch'; Environment='esp32s3-F16R8'; Port='COM9'; Chip='esp32s3'; FlashSize=0x1000000; AppOffset=0x10000; AppSize=0x700000; FsOffset=0xE10000; FsSize=0x1F0000; VariantPolicy='rgb' },
-    [pscustomobject]@{ Device='C3'; Environment='esp32c3-F4R0'; Port='COM4'; Chip='esp32c3'; FlashSize=0x400000; AppOffset=0x10000; AppSize=0x330000; FsOffset=0x340000; FsSize=0xC0000; VariantPolicy='canonical' },
-    [pscustomobject]@{ Device='C6'; Environment='esp32c6-F4R0'; Port='COM11'; Chip='esp32c6'; FlashSize=0x400000; AppOffset=0x10000; AppSize=0x330000; FsOffset=0x340000; FsSize=0xC0000; VariantPolicy='canonical' },
-    [pscustomobject]@{ Device='ESP32'; Environment='esp32-F4R0'; Port='COM16'; Chip='esp32'; FlashSize=0x400000; AppOffset=0x10000; AppSize=0x330000; FsOffset=0x340000; FsSize=0xC0000; VariantPolicy='canonical' },
+    [pscustomobject]@{ Device='C3'; Environment='esp32c3-F4R0'; Port='COM4'; Chip='esp32c3'; FlashSize=0x400000; AppOffset=0x10000; AppSize=0x340000; FsOffset=0x350000; FsSize=0x0B0000; VariantPolicy='canonical' },
+    [pscustomobject]@{ Device='C6'; Environment='esp32c6-F4R0'; Port='COM11'; Chip='esp32c6'; FlashSize=0x400000; AppOffset=0x10000; AppSize=0x340000; FsOffset=0x350000; FsSize=0x0B0000; VariantPolicy='canonical' },
+    [pscustomobject]@{ Device='ESP32'; Environment='esp32-F4R0'; Port='COM16'; Chip='esp32'; FlashSize=0x400000; AppOffset=0x10000; AppSize=0x340000; FsOffset=0x350000; FsSize=0x0B0000; VariantPolicy='canonical' },
     [pscustomobject]@{ Device='S3F8'; Environment='esp32s3-F8R0'; Port='COM7'; Chip='esp32s3'; FlashSize=0x800000; AppOffset=0x10000; AppSize=0x380000; FsOffset=0x710000; FsSize=0xF0000; VariantPolicy='canonical' }
 )
 $currentSummary = [pscustomobject]@{ results = @(

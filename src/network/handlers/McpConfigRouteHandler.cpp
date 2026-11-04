@@ -13,6 +13,8 @@
 #include "network/handlers/MqttRouteHandler.h"
 #endif
 
+#if FASTBEE_ENABLE_MCP_CONFIG || defined(UNIT_TEST)
+
 namespace {
 
 struct BodyBuffer {
@@ -350,3 +352,5 @@ void McpConfigRouteHandler::handleSecret(AsyncWebServerRequest* request) {
     }
     sendDocument(request, output, stored ? 200 : errorStatus(error));
 }
+
+#endif // FASTBEE_ENABLE_MCP_CONFIG || UNIT_TEST

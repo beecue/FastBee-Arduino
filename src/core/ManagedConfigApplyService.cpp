@@ -1,4 +1,7 @@
 #include "core/ManagedConfigApplyService.h"
+#include "core/FeatureFlags.h"
+
+#if FASTBEE_ENABLE_MCP_CONFIG || defined(UNIT_TEST)
 
 #include <algorithm>
 #include <new>
@@ -344,7 +347,7 @@ protected:
                 error = "MIGRATION_FEATURE_UNKNOWN";
                 return false;
             }
-            if (row.value()["enabled"].as<bool>() && !metadata->compiled) {
+            if (row.value()["enabled"].as<bool>() && metadata->displayName && !metadata->compiled) {
                 error = "MIGRATION_FEATURE_UNAVAILABLE";
                 return false;
             }
@@ -785,11 +788,16 @@ bool ManagedConfigApplyService::capabilities(JsonDocument& output, String& error
     }
     const String revision = revisionFromValues(values);
     if (revision.isEmpty()) return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, "CONFIG_READ_FAILED");
+    globalRevisionCache_ = revision;
     output["success"] = true;
     output["schemaVersion"] = 1;
     output["compiled"] = true;
     output["runtimeAvailable"] = true;
     output["revision"] = revision;
+    JsonObject limits = output["limits"].to<JsonObject>();
+    limits["maxApplyBodyBytes"] = kMaxRequestBodyBytes;
+    limits["maxSnapshotResultBytes"] = kMaxSnapshotResultBytes;
+    limits["maxOperations"] = kMaxOperations;
     JsonObject sections = output["sections"].to<JsonObject>();
     for (const auto& entry : values) {
         auto* adapterValue = entry.adapter;
@@ -842,16 +850,35 @@ bool ManagedConfigApplyService::snapshot(const std::vector<String>& selected,
     std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     output.clear();
     if (!initialized_) return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, "MCP adapter allocation failed");
-    std::vector<SnapshotValue> values;
-    if (!readConsistentValues(adapters_, {}, values, error)) {
-        return fail(output, error == "QUOTA_EXCEEDED" ? "QUOTA_EXCEEDED" :
-                    error == "INVALID_ARGUMENT" ? "INVALID_ARGUMENT" : "DEVICE_CHANNEL_UNAVAILABLE",
-                    error, error.c_str());
-    }
     for (const auto& requested : selected) {
         if (!adapter(requested)) return fail(output, "INVALID_ARGUMENT", error, "Unknown configuration section");
     }
-    const String revision = revisionFromValues(values);
+    std::vector<SnapshotValue> values;
+    if (selected.empty()) {
+        if (!readConsistentValues(adapters_, {}, values, error)) {
+            return fail(output, error == "QUOTA_EXCEEDED" ? "QUOTA_EXCEEDED" :
+                        error == "INVALID_ARGUMENT" ? "INVALID_ARGUMENT" : "DEVICE_CHANNEL_UNAVAILABLE",
+                        error, error.c_str());
+        }
+        globalRevisionCache_ = revisionFromValues(values);
+    }
+    else {
+        if (globalRevisionCache_.isEmpty()) {
+            std::vector<SnapshotValue> revisionValues;
+            if (!readConsistentValues(adapters_, {}, revisionValues, error)) {
+                return fail(output, error == "QUOTA_EXCEEDED" ? "QUOTA_EXCEEDED" :
+                            error == "INVALID_ARGUMENT" ? "INVALID_ARGUMENT" : "DEVICE_CHANNEL_UNAVAILABLE",
+                            error, error.c_str());
+            }
+            globalRevisionCache_ = revisionFromValues(revisionValues);
+        }
+        if (!readConsistentValues(adapters_, selected, values, error)) {
+            return fail(output, error == "QUOTA_EXCEEDED" ? "QUOTA_EXCEEDED" :
+                        error == "INVALID_ARGUMENT" ? "INVALID_ARGUMENT" : "DEVICE_CHANNEL_UNAVAILABLE",
+                        error, error.c_str());
+        }
+    }
+    const String revision = globalRevisionCache_;
     if (revision.isEmpty()) return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, "CONFIG_READ_FAILED");
     output["success"] = true;
     output["revision"] = revision;
@@ -1191,6 +1218,7 @@ String ManagedConfigApplyService::apply(JsonVariantConst request, JsonDocument& 
     std::lock_guard<std::mutex> lock(mutex_);
     std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     output.clear();
+    globalRevisionCache_.clear();
     std::vector<Candidate> candidates;
     if (!parseCandidates(request["operations"], candidates, output, error)) return output["code"].as<const char*>();
     const String baseRevision = request["baseRevision"].as<const char*>() ?: "";
@@ -1478,6 +1506,7 @@ String ManagedConfigApplyService::rollback(JsonVariantConst request, JsonDocumen
     std::lock_guard<std::mutex> lock(mutex_);
     std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     output.clear();
+    globalRevisionCache_.clear();
     const String id = request["operationId"].as<const char*>() ?: "";
     const String key = request["idempotencyKey"].as<const char*>() ?: "";
     const String approval = request["approvalHash"].as<const char*>() ?: "";
@@ -1659,6 +1688,7 @@ bool ManagedConfigApplyService::storeSecret(const String& secretRef, const Strin
     }
     std::lock_guard<std::mutex> lock(mutex_);
     std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
+    globalRevisionCache_.clear();
     const String requestHash = ManagedConfigRevision::sha256(
         std::string(secretRef.c_str()) + "\n" + value.c_str());
     for (const auto& record : secrets_) {
@@ -1697,6 +1727,7 @@ bool ManagedConfigApplyService::mqttTest(JsonVariantConst request, JsonDocument&
     std::lock_guard<std::mutex> lock(mutex_);
     std::lock_guard<std::recursive_mutex> transaction(FastBee::ConfigTransaction::mutex());
     output.clear();
+    globalRevisionCache_.clear();
     if (!initialized_) return fail(output, "DEVICE_CHANNEL_UNAVAILABLE", error, "MCP adapter allocation failed");
     // 连接测试会临时暂存候选配置：存在结果不明/人工恢复屏障时禁止执行
     if (checkUnknownGate(output, error) || checkManualRecoveryGate(output, error)) return false;
@@ -1825,3 +1856,5 @@ void ManagedConfigApplyService::setProtocolManager(ProtocolManager* manager) {
 #endif
 
 } // namespace FastBee
+
+#endif // FASTBEE_ENABLE_MCP_CONFIG || UNIT_TEST

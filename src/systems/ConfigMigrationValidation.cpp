@@ -95,7 +95,8 @@ struct Graph {
     bool triggerSource(const String& ref)const {
         if(source(ref))return true;
         for(const auto& id:protocolTriggers)if(id==ref)return true;
-        return false;
+        const auto* peripheral=target(ref);
+        return peripheral&&peripheral->enabled&&isGpioDigitalInputType(peripheral->type);
     }
 };
 bool validateFeatures(Graph& graph,String& error){
@@ -109,7 +110,7 @@ bool validateFeatures(Graph& graph,String& error){
         const RuntimeFeatureManager::FeatureMeta* feature=nullptr;
         for(size_t i=0;i<manager.featureCount();++i)if(!strcmp(manager.getFeatureAt(i)->key,row.key().c_str()))feature=manager.getFeatureAt(i);
         if(!feature)return fail(error,"MIGRATION_FEATURE_UNKNOWN");
-        if(row.value()["enabled"].as<bool>()&&(!feature->compiled||
+        if(row.value()["enabled"].as<bool>()&&((feature->displayName && !feature->compiled)||
            (feature->dependsOn&&*feature->dependsOn&&!graph.feature(feature->dependsOn))))
             return fail(error,"MIGRATION_FEATURE_UNAVAILABLE");
     }
@@ -323,7 +324,9 @@ bool validateGraph(const Manifest& manifest,void* opaque,String& error){
         if(!readJson(effectivePath(manifest,5),document,20*1024,error))return false;
         if(!document.isNull()){
 #if FASTBEE_ENABLE_SCREEN_PANEL
-            if(document["storageVersion"]!=1||document["touchUiMigration"]!=2||!document["revision"].is<uint32_t>()||
+            if(document["storageVersion"]!=1||
+               (!document["touchUiMigration"].isNull()&&document["touchUiMigration"]!=2)||
+               !document["revision"].is<uint32_t>()||
                !document["revision"].as<uint32_t>()||!ScreenPanelManager::validateConfig(document["config"],graph.panel,error))
                 return fail(error,"MIGRATION_PANEL_SCHEMA");
 #else
@@ -391,7 +394,7 @@ bool validateGraph(const Manifest& manifest,void* opaque,String& error){
 #endif
         }
         if(!readJson(effectivePath(manifest,4),document,RuleScriptImportMaxBytes,error))return false;
-        if(!document.isNull()){
+        if(!document.isNull()&&!(document.size()==1&&document["rules"].isNull())){
 #if FASTBEE_ENABLE_RULE_SCRIPT
             RuleScriptMap<String,RuleScript> scripts;
             if(!ruleScriptCandidateMemory<decltype(scripts)>(document.as<JsonVariantConst>(),true))return fail(error,"MIGRATION_RULE_SCRIPT_MEMORY");

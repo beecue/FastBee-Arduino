@@ -1,4 +1,4 @@
-﻿# FastBee-Arduino: Build All Artifacts Script
+# FastBee-Arduino: Build All Artifacts Script
 # ==========================================
 # Unified Architecture v2.0 - Single Firmware Variant
 #
@@ -547,7 +547,7 @@ $totalDeltaKB = 0
 $thresholdFlashKB = 2048  # 2KB 红线
 $thresholdWarningKB = 512 # 500B 警告
 $appCapacityByFlashMB = @{
-    4 = 0x330000  # partitions/4MB.csv app0 (3.1875MB; single app)
+    4 = 0x340000  # partitions/4MB.csv app0 (3.25MB; single app)
     8 = 0x380000  # partitions/8MB.csv app0/app1
     16 = 0x700000 # partitions/16MB.csv app0/app1
 }

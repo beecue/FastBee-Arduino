@@ -7,10 +7,10 @@
 #   Bootloader  0x000000    36KB   (reserved)
 #   NVS         0x009000    20KB   (non-volatile storage)
 #   OTA Data    0x00E000     8KB   (reserved for Arduino partition tooling)
-#   App0        0x010000  3.1875MB (single active firmware image)
-#   LittleFS    0x340000  768KB    (web/config filesystem)
+#   App0        0x010000  3.25MB   (single active firmware image)
+#   LittleFS    0x350000  704KB    (web/config filesystem)
 # NOTE: partition label MUST be "spiffs" because Arduino-ESP32 LittleFS.begin() looks up the "spiffs" label by default
 nvs,      data, nvs,     0x9000,   0x5000,
 otadata,  data, ota,     0xe000,   0x2000,
-app0,     app,  ota_0,   0x10000,  0x330000,
-spiffs,   data, spiffs,  0x340000, 0x0C0000,
+app0,     app,  ota_0,   0x10000,  0x340000,
+spiffs,   data, spiffs,  0x350000, 0x0B0000,

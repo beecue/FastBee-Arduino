@@ -55,7 +55,8 @@ const CAPABILITY_MACROS = Object.freeze({
     ethernet: 'FASTBEE_ENABLE_ETHERNET',
     cellular: 'FASTBEE_ENABLE_CELLULAR',
     i18n: 'FASTBEE_ENABLE_I18N',
-    aiAssistant: 'FASTBEE_ENABLE_AI'
+    aiAssistant: 'FASTBEE_ENABLE_AI',
+    mcpConfigBridge: 'FASTBEE_ENABLE_MCP_CONFIG'
 });
 
 // Independently loadable optional resources are listed here. Array rules mean

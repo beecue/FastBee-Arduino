@@ -60,8 +60,37 @@
     {
       "name": "mcp-config-snapshot",
       "method": "GET",
-      "path": "/api/mcp/config/snapshot",
-      "description": "全分节脱敏快照；不包含网络或协议秘密明文"
+      "path": "/api/mcp/config/snapshot?sections=peripherals",
+      "description": "按分节返回脱敏快照并保留全局 revision；不包含网络或协议秘密明文"
+    },
+    {
+      "name": "mcp-config-preflight",
+      "type": "expect-error",
+      "method": "POST",
+      "path": "/api/mcp/config/preflight",
+      "jsonBody": true,
+      "body": {
+        "baseRevision": "",
+        "operations": []
+      },
+      "allowedStatuses": [400],
+      "skipSoak": true,
+      "skipReason": "使用空候选验证生产预检拒绝路径，不执行配置写入",
+      "description": "空草案必须被生产预检拒绝且不改变设备配置"
+    },
+    {
+      "name": "mcp-config-readback",
+      "type": "expect-error",
+      "method": "POST",
+      "path": "/api/mcp/config/readback",
+      "jsonBody": true,
+      "body": {
+        "operationId": "mcp-missing-operation"
+      },
+      "allowedStatuses": [400, 404],
+      "skipSoak": true,
+      "skipReason": "查询不存在的操作，验证只读恢复路径不重放写入",
+      "description": "不存在的操作只返回错误或不存在，不自动重试或回滚"
     },
     {
       "name": "system-metrics",

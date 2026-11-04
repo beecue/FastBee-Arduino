@@ -24,6 +24,7 @@ dist/
 .codex/
 .codex-logs/
 .superpowers/
+/docs/superpowers/
 *.swp
 *.swo
 *~

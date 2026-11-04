@@ -671,6 +671,9 @@ function compiledModuleSequences(context = BUILD_CONTEXT) {
     if (capabilities.screenPanel) {
         sequences['screen-panel'] = ['screen-panel-model', 'screen-panel'];
     }
+    if (capabilities.aiAssistant) {
+        sequences['ai-mcp'] = [];
+    }
     return sequences;
 }
 

@@ -38,12 +38,45 @@
             <label><input id="ai-clear-key" type="checkbox"> 清除已保存 Key</label>
             <button id="ai-save-provider" type="submit" class="fb-btn fb-btn-primary">保存本地模型配置</button>
         </form>
+        <div class="ai-card" aria-label="MCP 首次配置向导">
+            <strong>MCP 接入步骤</strong>
+            <ol>
+                <li>使用包含 MCP 配置桥的固件；设备端对话还需要编译 AI 的固件。</li>
+                <li>开启开发者模式和 AI 助手功能，保存模型连接。</li>
+                <li>保存公网可信 HTTPS MCP 地址，准备所需 scope 的 OAuth 令牌。</li>
+                <li>在管理后台创建一次性配对码，在此完成设备配对。</li>
+                <li>看到“MCP 已就绪”后再使用文档和配置工具。</li>
+            </ol>
+            <div id="ai-mcp-state" class="ai-status" role="status">MCP 未配对</div>
+            <div id="ai-mcp-state-detail" class="ai-status" role="status"></div>
+            <button id="ai-mcp-resume" type="button" class="fb-btn">恢复当前会话</button>
+            <button id="ai-mcp-disconnect" type="button" class="fb-btn">断开并清除会话</button>
+        </div>
         <form id="ai-mcp-form" class="ai-card" aria-label="可选 MCP 文档与工具">
             <input id="ai-mcp-url" class="ai-config-input" type="url" aria-label="MCP 云端 HTTPS 地址；留空使用本地模式" placeholder="MCP 云端 HTTPS 地址；留空使用本地模式">
             <input id="ai-oauth-token" class="ai-config-input" type="password" aria-label="OAuth 令牌（仅本次浏览器会话）" placeholder="OAuth 令牌（仅本次浏览器会话）" autocomplete="off">
             <input id="ai-pair-code" class="ai-config-input" type="password" aria-label="一次性配对码" placeholder="一次性配对码" autocomplete="off">
             <button id="ai-save-mcp" type="submit" class="fb-btn">保存 MCP 地址</button>
             <button id="ai-mcp-connect" type="button" class="fb-btn">配对并连接</button>
+            <details>
+                <summary>使用 OAuth Authorization Code + PKCE（可选）</summary>
+                <input id="ai-oauth-authorize" class="ai-config-input" type="url" aria-label="OAuth 授权端点" placeholder="OAuth 授权端点（HTTPS）">
+                <input id="ai-oauth-token-endpoint" class="ai-config-input" type="url" aria-label="OAuth 令牌端点" placeholder="OAuth 令牌端点（HTTPS）">
+                <input id="ai-oauth-client-id" class="ai-config-input" type="text" aria-label="OAuth Client ID" placeholder="OAuth Client ID" autocomplete="off">
+                <button id="ai-oauth-begin" type="button" class="fb-btn">跳转到授权服务器登录</button>
+                <p class="ai-status">state、nonce 和 PKCE verifier 仅保留在当前浏览器会话；无法使用时仍可输入短期 OAuth 令牌。</p>
+            </details>
+            <details>
+                <summary>MQTT 秘密与连接测试（独立确认）</summary>
+                <select id="ai-secret-ref" class="ai-config-input" aria-label="秘密引用">
+                    <option value="protocol.mqtt.password">protocol.mqtt.password</option>
+                    <option value="protocol.mqtt.mqttSecret">protocol.mqtt.mqttSecret</option>
+                    <option value="protocol.mqtt.authCode">protocol.mqtt.authCode</option>
+                </select>
+                <input id="ai-secret-value" class="ai-config-input" type="password" maxlength="1024" aria-label="设备本地秘密值" placeholder="设备本地秘密值（不进入云端或模型）" autocomplete="new-password">
+                <button id="ai-secret-submit" type="button" class="fb-btn">仅提交到设备秘密接口</button>
+                <button id="ai-mqtt-test" type="button" class="fb-btn">确认执行一次 MQTT 连接测试</button>
+            </details>
         </form>
         <div id="ai-config-status" class="ai-status" role="status"></div>
     </section>

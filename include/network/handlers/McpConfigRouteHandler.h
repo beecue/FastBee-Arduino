@@ -35,7 +35,7 @@ private:
     void handleMqttTestStatus(AsyncWebServerRequest* request);
     void sendDocument(AsyncWebServerRequest* request, JsonDocument& document, int status = 200);
 
-    static constexpr size_t kMaxBodyBytes = 32768;
+    static constexpr size_t kMaxBodyBytes = FastBee::ManagedConfigApplyService::kMaxRequestBodyBytes;
 };
 
 #endif // MCP_CONFIG_ROUTE_HANDLER_H

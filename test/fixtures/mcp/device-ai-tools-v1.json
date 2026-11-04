@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "description": "Device-AI model arguments. Paired deviceId and baseRevision are injected by the browser and are intentionally absent here.",
+  "tools": {
+    "get_device_capabilities": { "required": [], "properties": {} },
+    "list_peripherals": { "required": [], "properties": ["cursor", "limit"] },
+    "read_peripheral": { "required": ["peripheralId"], "properties": ["peripheralId"] },
+    "list_execution_rules": { "required": [], "properties": ["cursor", "limit"] },
+    "list_rule_scripts": { "required": [], "properties": ["cursor", "limit"] },
+    "get_protocol_configuration": { "required": [], "properties": {} },
+    "get_configuration_history": { "required": [], "properties": ["cursor", "limit"] },
+    "create_config_draft": { "required": [], "properties": [] },
+    "get_configuration_draft": { "required": ["draftId"], "properties": ["draftId"] },
+    "upsert_peripheral": {
+      "required": ["draftId", "expectedVersion", "peripheral"],
+      "properties": ["draftId", "expectedVersion", "peripheral"],
+      "expectedVersionMinimum": 0,
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "draftId": { "type": "string", "description": "配置草案 UUID", "maxLength": 128 },
+          "expectedVersion": { "type": "integer", "description": "期望草案版本（乐观锁，取自最近草案响应）", "minimum": 0, "maximum": 1000000 },
+          "peripheral": {
+            "type": "object",
+            "description": "外设定义：id/type/name/enabled/pins/params",
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "maxLength": 40, "pattern": "^[A-Za-z0-9_-]{1,40}$" },
+              "name": { "type": "string", "maxLength": 64 },
+              "type": { "type": "integer", "minimum": 1, "maximum": 60 },
+              "enabled": { "type": "boolean" },
+              "pinCount": { "type": "integer", "minimum": 1, "maximum": 8 },
+              "pins": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 8,
+                "items": { "type": "integer", "minimum": 0, "maximum": 48 }
+              },
+              "activeHigh": { "type": "boolean" },
+              "sampleInterval": { "type": "integer", "minimum": 20, "maximum": 3600000 },
+              "params": { "type": "object" }
+            },
+            "required": ["name", "type", "pins"]
+          }
+        },
+        "required": ["draftId", "expectedVersion", "peripheral"]
+      }
+    },
+    "remove_peripheral": { "required": ["draftId", "expectedVersion", "peripheralId"], "properties": ["draftId", "expectedVersion", "peripheralId"], "expectedVersionMinimum": 0 },
+    "set_peripheral_enabled": { "required": ["draftId", "expectedVersion", "peripheralId", "enabled"], "properties": ["draftId", "expectedVersion", "peripheralId", "enabled"], "expectedVersionMinimum": 0 },
+    "validate_configuration_draft": { "required": ["draftId"], "properties": ["draftId"] },
+    "get_configuration_operation": { "required": ["operationId"], "properties": ["operationId"] },
+    "request_document_upload": { "required": ["fileName", "sizeBytes", "sha256"], "properties": ["fileName", "sizeBytes", "sha256"], "sizeBytesMinimum": 1, "sizeBytesMaximum": 20971520 },
+    "list_documents": { "required": [], "properties": ["cursor", "limit"] },
+    "get_document_status": { "required": ["documentId"], "properties": ["documentId"] },
+    "search_documents": { "required": ["query"], "properties": ["query", "documentId", "cursor", "limit"], "limitMaximum": 50 },
+    "extract_configuration_facts": { "required": ["documentId"], "properties": ["documentId", "kind"] },
+    "get_device_config_section": { "required": ["section"], "properties": ["section"] },
+    "get_device_status": { "required": [], "properties": [] },
+    "update_device_profile": { "required": ["draftId", "expectedVersion", "profile"], "properties": ["draftId", "expectedVersion", "profile"], "expectedVersionMinimum": 0 },
+    "configure_runtime_features": { "required": ["draftId", "expectedVersion", "features"], "properties": ["draftId", "expectedVersion", "features"], "expectedVersionMinimum": 0 },
+    "upsert_execution_rule": { "required": ["draftId", "expectedVersion", "rule"], "properties": ["draftId", "expectedVersion", "rule"], "expectedVersionMinimum": 0 },
+    "remove_execution_rule": { "required": ["draftId", "expectedVersion", "ruleId"], "properties": ["draftId", "expectedVersion", "ruleId"], "expectedVersionMinimum": 0 },
+    "dry_run_execution_rule": { "required": ["draftId", "ruleId"], "properties": ["draftId", "ruleId", "inputs"] },
+    "upsert_rule_script": { "required": ["draftId", "expectedVersion", "script"], "properties": ["draftId", "expectedVersion", "script", "variables"], "expectedVersionMinimum": 0 },
+    "remove_rule_script": { "required": ["draftId", "expectedVersion", "scriptId"], "properties": ["draftId", "expectedVersion", "scriptId"], "expectedVersionMinimum": 0 },
+    "configure_modbus_rtu": { "required": ["draftId", "expectedVersion", "bus"], "properties": ["draftId", "expectedVersion", "bus"], "expectedVersionMinimum": 0 },
+    "upsert_modbus_device": { "required": ["draftId", "expectedVersion", "device"], "properties": ["draftId", "expectedVersion", "device"], "expectedVersionMinimum": 0 },
+    "remove_modbus_device": { "required": ["draftId", "expectedVersion", "slaveAddress"], "properties": ["draftId", "expectedVersion", "slaveAddress"], "expectedVersionMinimum": 0 },
+    "upsert_modbus_poll_task": { "required": ["draftId", "expectedVersion", "taskIndex", "task"], "properties": ["draftId", "expectedVersion", "taskIndex", "task", "source"], "expectedVersionMinimum": 0 },
+    "remove_modbus_poll_task": { "required": ["draftId", "expectedVersion", "taskIndex"], "properties": ["draftId", "expectedVersion", "taskIndex"], "expectedVersionMinimum": 0 },
+    "configure_mqtt": { "required": ["draftId", "expectedVersion", "connection"], "properties": ["draftId", "expectedVersion", "connection"], "expectedVersionMinimum": 0 },
+    "upsert_mqtt_topic": { "required": ["draftId", "expectedVersion", "list", "topic"], "properties": ["draftId", "expectedVersion", "list", "topic"], "expectedVersionMinimum": 0 },
+    "remove_mqtt_topic": { "required": ["draftId", "expectedVersion", "list", "topic"], "properties": ["draftId", "expectedVersion", "list", "topic"], "expectedVersionMinimum": 0 },
+    "preview_configuration_draft": { "required": ["draftId"], "properties": ["draftId"] },
+    "refresh_device_capabilities": { "required": [], "properties": [] },
+    "list_workflow_templates": { "required": [], "properties": [] },
+    "start_configuration_workflow": { "required": ["templateId"], "properties": ["templateId", "input"] },
+    "get_workflow_run": { "required": ["runId"], "properties": ["runId"] },
+    "cancel_workflow_run": { "required": ["runId"], "properties": ["runId"] },
+    "parse_document": { "required": ["documentId"], "properties": ["documentId"] },
+    "retry_document_parsing": { "required": ["documentId"], "properties": ["documentId"] },
+    "get_operation_audit": { "required": [], "properties": ["deviceId", "tool", "resultCode", "pageNum", "pageSize"] },
+    "submit_feedback": { "required": ["category", "message"], "properties": ["category", "message"] }
+  }
+}

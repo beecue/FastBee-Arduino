@@ -66,6 +66,8 @@ public:
 class ManagedConfigApplyService {
 public:
     static constexpr size_t kMaxAdapters = 10;
+    static constexpr size_t kMaxRequestBodyBytes = 32768;
+    static constexpr size_t kMaxSnapshotResultBytes = 49152;
     static constexpr size_t kMaxOperations = 8;
     static constexpr size_t kMaxOperationHistory = 8;
     static constexpr size_t kMaxAggregateBytes = 96 * 1024;
@@ -156,6 +158,7 @@ private:
     uint32_t nextOperation_ = 1;
     size_t historyBytes_ = 0;
     bool initialized_ = true;
+    String globalRevisionCache_;
     String unresolvedOperationId_;
     String manualRecoveryOperationId_;
     MqttTestStarter mqttTestStarter_ = nullptr;

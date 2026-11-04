@@ -36,6 +36,11 @@ if (rows.some((row) => row.type === 'app' && row.subtype === 'ota_1')) {
 if (!rows.some((row) => row.name === 'spiffs' && row.type === 'data')) {
     failures.push('4MB partition is missing the LittleFS-compatible spiffs label');
 }
+const app4 = rows.find((row) => row.name === 'app0');
+const fs4 = rows.find((row) => row.name === 'spiffs');
+if (!app4 || app4.size !== 0x340000 || !fs4 || fs4.offset !== app4.offset + app4.size || fs4.size !== 0x0B0000) {
+    failures.push('4MB MCP layout must provide 0x340000 app bytes and 0x0B0000 contiguous filesystem bytes');
+}
 
 const modbusHeader = read('include/protocols/ModbusHandler.h');
 const modbusSource = read('src/protocols/ModbusHandler.cpp');

@@ -75,6 +75,8 @@ powershell -ExecutionPolicy Bypass -File scripts\deploy.ps1 -Env esp32s3-F8R8 -B
 
 常用参数：`-Env` 选择环境，`-Port` 指定串口，`-Monitor` 烧录后打开串口，`-SkipFs`/`-SkipFirmware` 跳过某一部分，`-SkipWeb` 跳过 Web 资源生成。也可以直接使用 `pio run -e <环境>`，但发布时必须同时更新 LittleFS 与固件。注意上传 LittleFS 会重写整个文件系统分区；升级已配置的设备时使用 `-SkipFs` 保留配置，或先在 Web 控制台导出备份。
 
+4MB 环境的 MCP 发布布局为 `app0=0x340000`、LittleFS 偏移 `0x350000`、大小 `0x0B0000`（704 KiB）。从旧的 `app0=0x330000` 布局升级会改变文件系统偏移，不能只写应用分区来保留现场配置；必须先备份同一设备配置，再按部署工具的完整固件与文件系统流程升级并回读核验。
+
 ### 3. 首次配置
 
 1. 设备启动后会进入 AP 模式；`apSSID` 为空时热点名为 `设备名-芯片ID前6位`，恢复出厂设置后的固定名称为 `fastbee-ap`，密码均为 `admin123`。
@@ -82,6 +84,16 @@ powershell -ExecutionPolicy Bypass -File scripts\deploy.ps1 -Env esp32s3-F8R8 -B
 3. 使用 `admin / admin123` 登录，立即修改密码。
 4. 在“网络配置”中填写 WiFi，保存后设备切换到 STA；之后可通过路由器 IP 或 `http://fastbee.local` 访问。
 5. 在“功能配置”中按需启用功能，再添加外设、配置 MQTT/Modbus 和外设执行规则。
+
+### 4. 可选：接入 MCP 与设备 AI
+
+1. 使用包含 MCP 配置桥的固件；设备端 AI 对话首版使用 `esp32s3-F16R8`，其他板卡可通过管理后台或外部 MCP 客户端使用配置桥。
+2. 开启开发者模式和 `aiAssistant`，在“AI 助手 → 连接配置”中保存模型地址、模型和 API Key。无 MCP 时本地 AI 仍可独立使用。
+3. 部署 HTTPS MCP 服务并配置设备页面 Origin，在管理后台创建一次性配对码，准备包含所需 FastBee scope 的 OAuth 令牌。
+4. 在设备 AI 页面保存 MCP 地址，输入 OAuth 令牌和配对码。配对成功仅表示连接器在线，页面完成协议初始化、工具目录和设备能力验证后才显示“MCP 已就绪”。
+5. OAuth、连接器令牌和配对码仅保留在当前浏览器会话。刷新页面可恢复有效会话；过期或撤销后按提示重新授权，不需要重复消耗配对码。
+
+详细协议与安全边界见 [设备 AI MCP 工具与文档契约](docs/ai-mcp-tool-contract.md)。
 
 ## 功能配置原则
 

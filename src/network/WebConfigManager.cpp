@@ -42,7 +42,9 @@
 #endif
 #include "./network/handlers/ProtocolRouteHandler.h"
 #include "./network/handlers/FeatureRouteHandler.h"
+#if FASTBEE_ENABLE_MCP_CONFIG
 #include "./network/handlers/McpConfigRouteHandler.h"
+#endif
 #if FASTBEE_ENABLE_AI
 #include "./network/handlers/AiRouteHandler.h"
 #endif
@@ -1274,8 +1276,10 @@ void WebConfigManager::setupAllRoutes() {
 #endif
 
     // 10c. MCP 统一配置桥（认证、开发者模式和 CSRF 沿用现有链路）
+#if FASTBEE_ENABLE_MCP_CONFIG
     static McpConfigRouteHandler mcpConfigRouteHandler(ctx.get());
     mcpConfigRouteHandler.setupRoutes(server);                ROUTE_PROBE("McpConfig");
+#endif
 #if FASTBEE_ENABLE_AI
     static AiRouteHandler aiRouteHandler(ctx.get());
     aiRouteHandler.setupRoutes(server);                       ROUTE_PROBE("Ai");

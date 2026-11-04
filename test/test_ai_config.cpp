@@ -37,7 +37,13 @@ void test_mcp_is_optional_and_provider_key_is_never_serialized() {
     String error;
     TEST_ASSERT_TRUE(AiConfigStore::validateMcpBaseUrl("", error));
     TEST_ASSERT_TRUE(AiConfigStore::validateMcpBaseUrl("https://mcp.example.test", error));
+    TEST_ASSERT_TRUE(AiConfigStore::validateMcpBaseUrl("http://127.0.0.1:8090", error));
+    TEST_ASSERT_TRUE(AiConfigStore::validateMcpBaseUrl("http://localhost:8090", error));
+    TEST_ASSERT_TRUE(AiConfigStore::validateMcpBaseUrl("http://localhost:000080", error));
+    TEST_ASSERT_TRUE(AiConfigStore::validateMcpBaseUrl("http://localhost:8090//", error));
     TEST_ASSERT_FALSE(AiConfigStore::validateMcpBaseUrl("http://mcp.example.test", error));
+    TEST_ASSERT_FALSE(AiConfigStore::validateMcpBaseUrl("http://192.168.5.24:8090", error));
+    TEST_ASSERT_FALSE(AiConfigStore::validateMcpBaseUrl("http://127.0.0.1.evil.test:8090", error));
     TEST_ASSERT_FALSE(AiConfigStore::validateMcpBaseUrl("https://u:p@mcp.example.test", error));
     config.apiKey = "never-return-this";
     JsonDocument doc;

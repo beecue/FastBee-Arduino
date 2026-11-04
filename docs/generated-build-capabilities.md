@@ -51,8 +51,8 @@ otaFs 的旧宏保留分区/发布配置兼容；即使宏为 1，当前无文�
 | rfid / FASTBEE_ENABLE_RFID | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 |
 | i2cSensors / FASTBEE_ENABLE_I2C_SENSORS | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 |
 | ioExpander / FASTBEE_ENABLE_IO_EXPANDER | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 |
-| irRemote / FASTBEE_ENABLE_IR_REMOTE | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 裁剪 | 包含 |
-| rfLearn / FASTBEE_ENABLE_RF_LEARN | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 裁剪 | 包含 |
+| irRemote / FASTBEE_ENABLE_IR_REMOTE | 包含 | 包含 | 包含 | 包含 | 裁剪 | 包含 | 包含 | 裁剪 | 包含 |
+| rfLearn / FASTBEE_ENABLE_RF_LEARN | 包含 | 包含 | 包含 | 包含 | 裁剪 | 包含 | 包含 | 裁剪 | 包含 |
 | ds1302 / FASTBEE_ENABLE_DS1302 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 |
 | lcd1602 / FASTBEE_ENABLE_LCD1602 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 |
 | ruleScript / FASTBEE_ENABLE_RULE_SCRIPT | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 |
@@ -69,6 +69,8 @@ otaFs 的旧宏保留分区/发布配置兼容；即使宏为 1，当前无文�
 | ethernet / FASTBEE_ENABLE_ETHERNET | 裁剪 | 包含 | 包含 | 裁剪 | 包含 | 裁剪 | 裁剪 | 包含 | 包含 |
 | cellular / FASTBEE_ENABLE_CELLULAR | 裁剪 | 包含 | 包含 | 裁剪 | 包含 | 裁剪 | 裁剪 | 包含 | 包含 |
 | i18n / FASTBEE_ENABLE_I18N | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 |
+| aiAssistant / FASTBEE_ENABLE_AI | 未声明 | 未声明 | 未声明 | 未声明 | 未声明 | 未声明 | 未声明 | 未声明 | 包含 |
+| mcpConfigBridge / FASTBEE_ENABLE_MCP_CONFIG | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 | 包含 |
 
 ## 可重现来源
 
@@ -76,20 +78,20 @@ otaFs 的旧宏保留分区/发布配置兼容；即使宏为 1，当前无文�
 
 | 来源 | 文本 SHA256 |
 | --- | --- |
-| platformio.ini | 2cca16d1101aeb94d330433d3befbbf6983196c37d7db9f0b4f1a5fa8c94e214 |
-| scripts/web-profile.js | 545a48a96c2e7ea16d4b778be51a5f3562a8afa97849a68d0a99a0337ef9ba7b |
+| platformio.ini | a1e300f6b98c5c4a02759d35eefd9d2f427e09051026391c986979ae619dca82 |
+| scripts/web-profile.js | 66562977f020fdfd819ee316272b8f870c71943f515b401606e5ca9a71e75619 |
 | scripts/generate-build-capabilities.js | 2bbb9e1cc6337aac36e7fbe61dff28d8afa7d909f9c246110214845bd3019690 |
 
 每环境指纹沿用 Web 发布清单算法，包含解析后的构建定义；不能替代候选输入/源码/镜像哈希。
 
 | 环境 | Web capabilityFingerprint |
 | --- | --- |
-| esp32-F4R0 | 65ae4755485e45afd264aba474533a32b5498bf3c66f092def0cd3f6a6f70c20 |
-| esp32-F8R0 | d08c148dc37fc8d64b86b4c56646af9bb129bac6577830bce56ca4670580db9f |
-| esp32-F8R8 | e16f39473922a90fe5b7af162591793edce5fd7c264e759158ef65277839978b |
-| esp32c3-F4R0 | d6bd418322a2af7540989e459bca7569095bd1c256cca53adb7a665d177d9f9a |
-| esp32s3-F8R0 | 92c24d0dddc058bef609b13f425337d8e17372bfd4980ff386b334c6c183b352 |
-| esp32c6-F4R0 | a6765707c5f92275cb8d0128a57cb5b97c926dcc4f5cd0dd9196286bc2552ac6 |
-| esp32c6-F8R0 | e23beee75b5fd8c6f138890766afd40d26fea5f8f6915d0c5ab63358fc242349 |
-| esp32s3-F8R8 | 0aef53ea15012fa73e2451004252f46dcdf3bbe9ef13d6295092ee19b425a2a3 |
-| esp32s3-F16R8 | 0b6ea4446f8d4226bcd5de9311ca245c66e92ea48dd970e51159d7763376152b |
+| esp32-F4R0 | 7f86d02aece645d8b827dab069e76f4b1d89ce3d2a659c30a0ad6dc6a98e10f1 |
+| esp32-F8R0 | fe7a1d712d68def51d38c4b2591d82a8e81e5f645617bc11cee670b01066f036 |
+| esp32-F8R8 | 0422faa6dbbd488db2218f960129dc8901067ec9c04e80812fad4d5659538b44 |
+| esp32c3-F4R0 | 328e44fcba0a965494ba07c825d03fc5d74915f8b58dd6b3659d6ea24be50a8a |
+| esp32s3-F8R0 | 0e35fe3a17b375dab3dc6c85f9c33055a9ded06f8c0df446a9fb10aac099edb0 |
+| esp32c6-F4R0 | 8db142dc28873ac28427fceecbff99d27a9fb3171e68ebac3e82d83c0e445553 |
+| esp32c6-F8R0 | 590f7dcd8e57a216b00a551467181f64574af82ee4ce31101ce942d511085b2f |
+| esp32s3-F8R8 | 85573751ce14bdef543105e085d159f9b016a34852314fad194247ae36d900c4 |
+| esp32s3-F16R8 | a4397e08f77879bc991fc99d6954585aa281ce4508dd9962d54df859b9c12103 |

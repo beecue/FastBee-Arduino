@@ -16,6 +16,7 @@
     var SCHEMA_VERSION = '1';
     var MAX_POLL_WAIT_MS = 20000;
     var MAX_RESULT_BYTES = 16384;
+    var MAX_SNAPSHOT_RESULT_BYTES = 49152;
     // 配对能力载荷上限（云端注册存储上限 16 KiB，留 1 KiB 余量）；
     // 超限时放弃外设目录而不是截断伪造，云端外设工具保持失败关闭
     var MAX_CAPABILITIES_BYTES = 15360;
@@ -39,8 +40,15 @@
         'network': '/api/network/config',
         'screenPanel': '/api/screen-panel/config'
     };
+    var SNAPSHOT_SECTIONS = Object.assign({ aiKey: true }, Object.keys(SECTION_PATHS).filter(function (key) {
+        return key !== 'screenPanel';
+    }).reduce(function (rows, key) {
+        rows[key] = true;
+        return rows;
+    }, {}));
     var ALLOWED_JOB_KEYS = ['jobId', 'type', 'section', 'idempotencyKey', 'deadlineAt', 'leaseExpiresAt',
-        'draftId', 'baseRevision', 'currentRevision', 'approvalHash', 'deviceIdempotencyKey', 'operations', 'operationId'];
+        'status', 'duplicate', 'draftId', 'baseRevision', 'currentRevision', 'approvalHash', 'deviceIdempotencyKey',
+        'operations', 'operationId'];
     var FORBIDDEN_JOB_KEYS = ['url', 'method', 'headers', 'body', 'path'];
     var UNCERTAIN_RESULT_JOB_TYPES = ['device.config.apply', 'device.config.rollback', 'device.config.readback'];
 
@@ -59,6 +67,19 @@
 
     // ---------- 设备同源只读调用（页面现有认证，不引入新凭据） ----------
 
+    function _deviceTimeoutMs(path) {
+        if (/\/(apply|rollback|readback|operations)(?:\/|\?|$)/.test(path)) return 130000;
+        if (path.indexOf('/api/mcp/config/preflight') === 0 || path.indexOf('/api/mcp/mqtt/test') === 0) return 45000;
+        return 25000;
+    }
+
+    function _deviceFetch(path, options, timeoutMs) {
+        var controller = new AbortController();
+        var timer = setTimeout(function () { controller.abort(); }, timeoutMs);
+        var fetchOptions = Object.assign({}, options, { signal: controller.signal });
+        return window.fetch(path, fetchOptions).finally(function () { clearTimeout(timer); });
+    }
+
     function _deviceGet(path) {
         function unwrap(resp) {
             if (path.indexOf('/api/mcp/config/') === 0) return _unwrapManaged(path, resp);
@@ -66,9 +87,9 @@
             return resp.data;
         }
         if (typeof window.apiGet === 'function') {
-            return Promise.resolve(window.apiGet(path)).then(unwrap);
+            return Promise.resolve(window.apiGet(path, {}, _deviceTimeoutMs(path))).then(unwrap);
         }
-        return window.fetch(path, { credentials: 'same-origin' }).then(function (resp) {
+        return _deviceFetch(path, { credentials: 'same-origin' }, _deviceTimeoutMs(path)).then(function (resp) {
             return resp.json().then(function (body) {
                 if (!resp.ok && path.indexOf('/api/mcp/config/') !== 0) throw new Error('DEVICE_API_FAILED');
                 return unwrap(body);
@@ -112,7 +133,7 @@
     function _validManagedResult(path, data) {
         if (!_isObject(data)) return false;
         if (path === '/api/mcp/config/preflight') return typeof data.allowed === 'boolean';
-        if (path === '/api/mcp/config/snapshot') {
+        if (path.split('?')[0] === '/api/mcp/config/snapshot') {
             return typeof data.revision === 'string' && data.revision.length > 0 && _isObject(data.sections);
         }
         if (path === '/api/mcp/mqtt/test') {
@@ -149,8 +170,13 @@
     function _unwrapManaged(path, resp) {
         if (!_isObject(resp)) throw new Error('OUTCOME_UNKNOWN');
         var managedConfig = path.indexOf('/api/mcp/config/') === 0;
+        var secretRequest = path.indexOf('/api/mcp/secrets/') === 0;
         if (resp.success === true) {
             var data = managedConfig ? resp : resp.data;
+            if (secretRequest) {
+                if (!data || data.consumed !== true) throw new Error('OUTCOME_UNKNOWN');
+                return data;
+            }
             if (!_validManagedResult(path, data)) throw new Error('OUTCOME_UNKNOWN');
             return data;
         }
@@ -170,15 +196,15 @@
 
     // 仅固定 Task 4 配置路由使用；结构化设备拒绝是已知失败，断连/无效正文是 UNKNOWN。
     function _devicePost(path, payload) {
-        if (typeof window.apiPost === 'function') {
-            return Promise.resolve(window.apiPost(path, payload)).then(function (resp) {
+        if (typeof window.apiPostJson === 'function') {
+            return Promise.resolve(window.apiPostJson(path, payload, _deviceTimeoutMs(path))).then(function (resp) {
                 return _unwrapManaged(path, resp);
             });
         }
-        return window.fetch(path, {
+        return _deviceFetch(path, {
             method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
-        }).then(function (resp) {
+        }, _deviceTimeoutMs(path)).then(function (resp) {
             return resp.json().then(function (body) {
                 if (!resp.ok && (!body || body.success !== false)) throw new Error('OUTCOME_UNKNOWN');
                 return _unwrapManaged(path, body);
@@ -406,16 +432,60 @@
             : unescape(encodeURIComponent(json)).length;
     }
 
-    function _buildCapabilities(sysCaps, catalog, execution) {
-        if (!sysCaps && !catalog && !execution) return null;
+    function _compactPeripheralCatalog(catalog) {
+        if (!catalog || typeof catalog !== 'object' || !catalog.data || typeof catalog.data !== 'object') return catalog;
+        var compact = {};
+        if (typeof catalog.success === 'boolean') compact.success = catalog.success;
+        if (catalog.profile && typeof catalog.profile === 'object' && typeof catalog.profile.max === 'number') {
+            compact.profile = { max: catalog.profile.max };
+        }
+        if (catalog.hardware && typeof catalog.hardware === 'object') {
+            compact.hardware = {};
+            if (typeof catalog.hardware.maxGpio === 'number') compact.hardware.maxGpio = catalog.hardware.maxGpio;
+            if (Array.isArray(catalog.hardware.reservedPins)) compact.hardware.reservedPins = catalog.hardware.reservedPins;
+        }
+        compact.data = {};
+        Object.keys(catalog.data).forEach(function (group) {
+            var rows = catalog.data[group];
+            if (!Array.isArray(rows)) return;
+            compact.data[group] = rows.map(function (row) {
+                if (!row || typeof row !== 'object') return row;
+                var output = {};
+                ['value', 'name', 'pinCount', 'implemented', 'configurable', 'outputCapable', 'requiredFeature']
+                    .forEach(function (key) {
+                        if (Object.prototype.hasOwnProperty.call(row, key)) output[key] = row[key];
+                    });
+                if (row.fields && typeof row.fields === 'object') {
+                    output.fields = {};
+                    Object.keys(row.fields).forEach(function (key) {
+                        var spec = row.fields[key];
+                        if (spec && typeof spec === 'object' && Array.isArray(spec.enum)) {
+                            output.fields[key] = { enum: spec.enum };
+                        }
+                    });
+                }
+                return output;
+            });
+        });
+        return compact;
+    }
+
+    function _buildCapabilities(sysCaps, catalog, execution, mcpCapabilities) {
+        if (!sysCaps && !catalog && !execution && !mcpCapabilities) return null;
         var combined = {};
         if (sysCaps && typeof sysCaps === 'object') {
             for (var key in sysCaps) {
                 if (Object.prototype.hasOwnProperty.call(sysCaps, key)) combined[key] = sysCaps[key];
             }
         }
+        if (mcpCapabilities && typeof mcpCapabilities === 'object') {
+            if (mcpCapabilities.limits && typeof mcpCapabilities.limits === 'object') {
+                combined.limits = mcpCapabilities.limits;
+            }
+            if (typeof mcpCapabilities.revision === 'string') combined.configRevision = mcpCapabilities.revision;
+        }
         if (catalog && typeof catalog === 'object') {
-            combined.peripheralCatalog = catalog;
+            combined.peripheralCatalog = _compactPeripheralCatalog(catalog);
         } else {
             combined.peripheralCatalogAvailable = false;
         }
@@ -456,7 +526,8 @@
             _deviceGetRaw('/api/peripherals/types').catch(function () { return null; }),
             // 执行目录（trigger-types + events/static）：云端外设执行规则工具的 schema 来源；
             // 读取失败时继续配对但不携带目录，云端规则工具失败关闭
-            _fetchExecutionCatalog()
+            _fetchExecutionCatalog(),
+            _deviceGetRaw('/api/mcp/capabilities').catch(function () { return null; })
         ]).then(function (results) {
             var info = results[0] || {};
             var sys = results[2] || {};
@@ -468,7 +539,7 @@
                 chipModel: chip.model || '',
                 firmwareVersion: (sys.device && sys.device.firmwareVersion) || '',
                 schemaVersion: SCHEMA_VERSION,
-                capabilities: _buildCapabilities(results[1], results[3], results[4]),
+                capabilities: _buildCapabilities(results[1], results[3], results[4], results[5]),
                 // 执行目录独立有界传输（不占能力载荷预算；云端独立列存储）
                 executionCatalog: results[4] && results[4].failed === false ? results[4].catalog : null
             };
@@ -512,9 +583,10 @@
                 _deviceGet('/api/system/capabilities'),
                 _deviceGetRaw('/api/peripherals/types').catch(function () { return null; }),
                 _fetchExecutionCatalog(),
-                _deviceGet('/api/system/info?brief=1').catch(function () { return null; })
+                _deviceGet('/api/system/info?brief=1').catch(function () { return null; }),
+                _deviceGetRaw('/api/mcp/capabilities').catch(function () { return null; })
             ]).then(function (results) {
-                var combined = _buildCapabilities(results[0], results[1], results[2]);
+                var combined = _buildCapabilities(results[0], results[1], results[2], results[4]);
                 if (combined && typeof combined === 'object'
                         && !Object.prototype.hasOwnProperty.call(combined, 'firmwareVersion')) {
                     var fw = results[3] && results[3].device && results[3].device.firmwareVersion;
@@ -536,8 +608,17 @@
             if (!path) return Promise.reject(new Error('INVALID_ARGUMENT'));
             return _deviceGet(path);
         },
-        'device.config.snapshot.read': function () {
-            return _deviceGet('/api/mcp/config/snapshot');
+        'device.config.snapshot.read': function (job) {
+            var query = job.section ? '?sections=' + encodeURIComponent(job.section) : '';
+            return _deviceGet('/api/mcp/config/snapshot' + query);
+        },
+        'device.config.revision.read': function () {
+            return _deviceGetRaw('/api/mcp/capabilities').then(function (capabilities) {
+                if (!capabilities || typeof capabilities.revision !== 'string' || !capabilities.revision) {
+                    throw new Error('DEVICE_API_FAILED');
+                }
+                return capabilities;
+            });
         },
         'device.config.preflight': function (job) {
             return _devicePost('/api/mcp/config/preflight', {
@@ -605,6 +686,8 @@
         if (!job.jobId || typeof job.jobId !== 'string') return 'INVALID_ARGUMENT';
         if (!job.idempotencyKey || typeof job.idempotencyKey !== 'string') return 'INVALID_ARGUMENT';
         if (typeof JOB_HANDLERS[job.type] !== 'function') return 'INVALID_ARGUMENT';
+        if ((job.status !== undefined && job.status !== 'LEASED') ||
+            (job.duplicate !== undefined && job.duplicate !== false)) return 'INVALID_ARGUMENT';
         for (var i = 0; i < FORBIDDEN_JOB_KEYS.length; i++) {
             if (Object.prototype.hasOwnProperty.call(job, FORBIDDEN_JOB_KEYS[i])) return 'INVALID_ARGUMENT';
         }
@@ -614,6 +697,10 @@
             }
         }
         if (job.type === 'device.config.section.read' && !SECTION_PATHS[job.section]) return 'INVALID_ARGUMENT';
+        if (job.type === 'device.config.snapshot.read' && job.section && !SNAPSHOT_SECTIONS[job.section]) {
+            return 'INVALID_ARGUMENT';
+        }
+        if (job.type === 'device.config.revision.read' && job.section) return 'INVALID_ARGUMENT';
         if (['device.config.operation.read', 'device.config.readback', 'device.config.rollback'].indexOf(job.type) >= 0
                 && (typeof job.operationId !== 'string' || !/^[A-Za-z0-9-]{1,128}$/.test(job.operationId))) {
             return 'INVALID_ARGUMENT';
@@ -648,7 +735,9 @@
                 }
                 // 超限结果明确失败，不截断伪造成功；写后无法证明结果时保持 UNKNOWN。
                 // 执行目录任务有独立的有界上限（生产尺寸依据见 MAX_EXEC_CATALOG_BYTES 注释）
-                var limit = job.type === 'device.execution-catalog.read' ? MAX_EXEC_CATALOG_BYTES : MAX_RESULT_BYTES;
+                var limit = job.type === 'device.execution-catalog.read' ? MAX_EXEC_CATALOG_BYTES :
+                    (['device.config.snapshot.read', 'device.config.section.read', 'device.config.revision.read']
+                        .indexOf(job.type) >= 0 ? MAX_SNAPSHOT_RESULT_BYTES : MAX_RESULT_BYTES);
                 if (json.length > limit) {
                     return _submitResult(job.jobId, job.idempotencyKey, writeJob ? 'UNKNOWN' : 'FAILED', null,
                         writeJob ? 'OUTCOME_UNKNOWN' : 'RESULT_TOO_LARGE');
@@ -756,13 +845,41 @@
 
     // ---------- 心跳与续期 ----------
 
+    function _readResourceSample() {
+        return Promise.all([
+            _deviceGet('/api/system/metrics').catch(function () { return null; }),
+            _deviceGet('/api/mqtt/status').catch(function () { return null; }),
+            _deviceGet('/api/modbus/status').catch(function () { return null; }),
+            _deviceGetRaw('/api/mcp/capabilities').catch(function () { return null; })
+        ]).then(function (results) {
+            var metrics = results[0] || {};
+            var memory = metrics.memory || metrics;
+            var mqtt = results[1] || {};
+            var modbus = results[2] || {};
+            var capabilities = results[3] || {};
+            var sample = { sampledAt: Date.now(), online: running };
+            if (typeof memory.freeHeap === 'number') sample.dramFree = memory.freeHeap;
+            if (typeof memory.maxAlloc === 'number') sample.dramMaxBlock = memory.maxAlloc;
+            if (typeof memory.psramFree === 'number') sample.psramFree = memory.psramFree;
+            if (typeof metrics.taskStackMinFree === 'number') sample.taskStackMinFree = metrics.taskStackMinFree;
+            if (typeof mqtt.state === 'string') sample.mqttState = mqtt.state;
+            else if (typeof mqtt.connected === 'boolean') sample.mqttState = mqtt.connected ? 'CONNECTED' : 'DISCONNECTED';
+            if (typeof modbus.state === 'string') sample.modbusState = modbus.state;
+            else if (typeof modbus.connected === 'boolean') sample.modbusState = modbus.connected ? 'CONNECTED' : 'DISCONNECTED';
+            if (typeof capabilities.revision === 'string' && capabilities.revision) sample.configRevision = capabilities.revision;
+            return sample;
+        });
+    }
+
     function _scheduleHeartbeat() {
         _clearTimer('heartbeat');
         heartbeatTimer = setTimeout(function () {
             heartbeatTimer = null;
             if (!running || !session) return;
-            _cloudPost(session.cloudBase + '/connector/v1/heartbeat', { state: lastState }, session.token, null, false)
-                .then(function (resp) {
+            _readResourceSample().then(function (resources) {
+                return _cloudPost(session.cloudBase + '/connector/v1/heartbeat', { state: lastState, resources: resources },
+                    session.token, null, false);
+            }).then(function (resp) {
                     if (resp && resp.status === 401) {
                         _expireSession();
                         return;
@@ -980,6 +1097,7 @@
             paired: !!session,
             running: running,
             deviceId: session ? session.deviceId : null,
+            cloudBase: session ? session.cloudBase : null,
             tokenExpiresAt: session ? session.tokenExpiresAt : null,
             sessionExpiresAt: session ? session.sessionExpiresAt : null,
             state: lastState,
@@ -988,8 +1106,24 @@
         };
     }
 
+    function submitSecret(secretRef, value, idempotencyKey) {
+        if (['protocol.mqtt.password', 'protocol.mqtt.mqttSecret', 'protocol.mqtt.authCode'].indexOf(secretRef) < 0 ||
+            typeof value !== 'string' || value.length > 1024 || typeof idempotencyKey !== 'string' ||
+            !idempotencyKey || idempotencyKey.length > 80) return Promise.reject(new Error('INVALID_ARGUMENT'));
+        return _devicePost('/api/mcp/secrets/' + encodeURIComponent(secretRef), { value: value, idempotencyKey: idempotencyKey });
+    }
+
+    function readGlobalRevision() {
+        return JOB_HANDLERS['device.config.revision.read']().then(function (capabilities) {
+            return capabilities.revision;
+        });
+    }
+
     window.FastBeeAiMcpConnector = {
         pair: pair,
+        submitSecret: submitSecret,
+        readGlobalRevision: readGlobalRevision,
+        readResourceSample: _readResourceSample,
         start: start,
         stop: stop,
         revoke: revoke,

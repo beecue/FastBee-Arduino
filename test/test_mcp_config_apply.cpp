@@ -37,6 +37,11 @@ public:
     bool readOnly() const override { return readOnly_; }
 
     bool readRedacted(JsonDocument& output, String& error) override {
+        ++readCalls;
+        if (failRead) {
+            error = "READ_FAILED";
+            return false;
+        }
         output.clear();
         if (!output.set(state_)) {
             error = "READ_FAILED";
@@ -196,6 +201,8 @@ public:
     int applyCalls = 0;
     int readbackCalls = 0;
     int secretCalls = 0;
+    int readCalls = 0;
+    bool failRead = false;
     int unknownAfterSuccessfulCalls = 0;
     bool unknownOnceConsumed = false;
     bool mismatchNextReadback = false;
@@ -827,6 +834,27 @@ void test_default_factory_protocol_is_valid() {
     TEST_ASSERT_TRUE(FastBee::validateProtocolConfigDocument(document, validationError));
 }
 
+void test_filtered_snapshot_uses_cached_revision_and_only_selected_values() {
+    Fixture fixture;
+    JsonDocument capabilities;
+    String error;
+    TEST_ASSERT_TRUE(fixture.service.capabilities(capabilities, error));
+    String large;
+    large.reserve(40001);
+    for (size_t i = 0; i < 40000; ++i) large += 'x';
+    fixture.peripherals.state_["large"] = large;
+    fixture.peripherals.readCalls = 0;
+    fixture.network.readCalls = 0;
+    fixture.network.failRead = true;
+
+    JsonDocument filtered;
+    TEST_ASSERT_TRUE(fixture.service.snapshot({"peripherals"}, filtered, error));
+    TEST_ASSERT_EQUAL_STRING(capabilities["revision"].as<const char*>(), filtered["revision"].as<const char*>());
+    TEST_ASSERT_EQUAL(40000, std::strlen(filtered["sections"]["peripherals"]["value"]["large"].as<const char*>()));
+    TEST_ASSERT_EQUAL(1, fixture.peripherals.readCalls);
+    TEST_ASSERT_EQUAL(0, fixture.network.readCalls);
+}
+
 void test_filtered_snapshot_keeps_complete_global_revision() {
     Fixture fixture;
     JsonDocument all;
@@ -1146,6 +1174,7 @@ void test_mcp_config_apply_group() {
     RUN_TEST(test_partial_apply_recovery_allows_confirmed_rollback_of_persisted_steps);
     RUN_TEST(test_partial_rollback_recovery_allows_rerollback_of_persisted_steps);
     RUN_TEST(test_default_factory_protocol_is_valid);
+    RUN_TEST(test_filtered_snapshot_uses_cached_revision_and_only_selected_values);
     RUN_TEST(test_filtered_snapshot_keeps_complete_global_revision);
     RUN_TEST(test_singular_publish_and_legacy_fields_are_validated);
     RUN_TEST(test_same_origin_rejects_cross_origin_mutation);

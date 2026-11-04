@@ -320,6 +320,8 @@ function verifyCase({ environment, expected, buildFlags, expectedRequestConcurre
     assert.deepStrictEqual(moduleSequences['screen-panel'], manifest.compiledCapabilities.screenPanel
         ? ['screen-panel-model', 'screen-panel'] : undefined,
     `${environment}: screen panel must load its model first only when compiled`);
+    assert.deepStrictEqual(moduleSequences['ai-mcp'], manifest.compiledCapabilities.aiAssistant ? [] : undefined,
+        `${environment}: AI MCP must use the scripts already bundled with the AI page`);
     if (manifest.compiledCapabilities.periphExec) {
         const editorSequence = moduleSequences['periph-exec-editor'] || [];
         assert.ok(editorSequence.includes('periph-exec-form'),

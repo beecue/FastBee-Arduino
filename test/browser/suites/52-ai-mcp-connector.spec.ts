@@ -11,6 +11,7 @@ import { resolve } from 'node:path';
 
 const root = resolve(__dirname, '../../..');
 const CONNECTOR = resolve(root, 'web-src/modules/ai/ai-mcp-connector.js');
+const GOVERNOR = resolve(root, 'web-src/js/request-governor.js');
 const CLOUD = 'https://mcp.fastbee.test';
 const ORIGIN = 'http://192.168.4.1';
 
@@ -130,7 +131,7 @@ async function setup(page: any) {
         if ((window as any).execCatalogFail) throw new Error('exec catalog down');
         return structuredClone((window as any).CONTROLS);
       }
-      if (path === '/api/mcp/config/snapshot') {
+      if (path.startsWith('/api/mcp/config/snapshot')) {
         if ((window as any).snapshotFail) throw new Error('snapshot down');
         return structuredClone((window as any).MCP_SNAPSHOT);
       }
@@ -139,11 +140,18 @@ async function setup(page: any) {
           { section: 'features', state: 'PENDING', accepted: false, persisted: false, readback: false },
         ] };
       }
+      if (path === '/api/system/metrics') return { success: true, data: {
+        memory: { freeHeap: 123456, maxAlloc: 65536, psramFree: 789012 }, taskStackMinFree: 8192 } };
+      if (path === '/api/mqtt/status') return { success: true, data: { state: 'CONNECTED', connected: true } };
+      if (path === '/api/modbus/status') return { success: true, data: { state: 'DISCONNECTED', connected: false } };
+      if (path === '/api/mcp/capabilities') return { success: true, revision: 'rev-heartbeat', sections: {},
+        limits: { maxOperations: 8, maxApplyBodyBytes: 32768, maxSnapshotResultBytes: 49152 } };
       if (path === '/api/device/config') return structuredClone((window as any).DEVICE_CONFIG);
       throw new Error('unexpected device api: ' + path);
     };
     w.apiPost = async (path: string, body: any) => {
       w.apiPostCalls.push({ path, body });
+      if (path === '/api/mcp/secrets/protocol.mqtt.password') return { success: true, data: { consumed: true } };
       if (path === '/api/mcp/config/apply') {
         if (w.applyResponses?.length) return w.applyResponses.shift();
         return { success: true, operationId: 'op-browser', state: 'SUCCEEDED', steps: [
@@ -165,6 +173,7 @@ async function setup(page: any) {
       }
       throw new Error('unexpected device write api: ' + path);
     };
+    w.apiPostJson = async (path: string, body: any) => w.apiPost(path, body);
     w.fetch = (url: string, opts: any = {}) => {
       const u = new URL(url);
       const body = opts.body ? JSON.parse(opts.body) : {};
@@ -241,6 +250,10 @@ test('pair stores token only in sessionStorage and never in URLs', async ({ page
   expect(calls[0].body.device.macAddress).toBe('00:11:22:33:44:55');
   expect(calls[0].body.device.chipModel).toBe('ESP32-S3');
   expect(calls[0].body.device.firmwareVersion).toBe('1.2.3');
+  expect(calls[0].body.device.capabilities.limits).toEqual({
+    maxOperations: 8, maxApplyBodyBytes: 32768, maxSnapshotResultBytes: 49152 });
+  const status = await page.evaluate(() => (window as any).FastBeeAiMcpConnector.status());
+  expect(status.cloudBase).toBe(CLOUD);
   // token 不得出现在任何请求 URL 中
   const urls = await page.evaluate(() => (window as any).cloudCalls.map((c: any) => c.path).join('|'));
   expect(urls).not.toContain('tok-1');
@@ -288,6 +301,91 @@ test('managed apply job uses only the fixed same-origin apply API and forwards i
   const result = (await page.evaluate(() => (window as any).cloudCalls)).find((c: any) => c.path.includes('job-apply'));
   expect(result.body.status).toBe('SUCCEEDED');
   expect(result.body.result.state).toBe('SUCCEEDED');
+});
+
+test('managed writes prefer the production JSON request helper over form apiPost', async ({ page }) => {
+  await setup(page);
+  await pair(page);
+  await page.evaluate(() => {
+    const w = window as any;
+    w.jsonPostCalls = [];
+    w.apiPostJson = async (path: string, body: any, timeoutMs?: number) => {
+      w.jsonPostCalls.push({ path, body, timeoutMs });
+      return { success: true, operationId: 'op-json', state: 'SUCCEEDED', steps: [
+        { section: 'peripherals', state: 'SUCCEEDED', accepted: true, persisted: true, readback: true },
+      ] };
+    };
+    w.FastBeeAiMcpConnector.start();
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).pendingPolls.length)).toBe(1);
+  await page.evaluate(() => {
+    (window as any).pendingPolls.shift()([
+      { jobId: 'job-json-apply', type: 'device.config.apply', idempotencyKey: 'cloud-json-key', deadlineAt: Date.now() + 60_000,
+        draftId: 'draft-1', baseRevision: 'rev-a', approvalHash: 'approval', deviceIdempotencyKey: 'device-json-key',
+        operations: [{ section: 'peripherals', schemaVersion: 1, patch: { enabled: true } }] },
+    ]);
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).cloudCalls.filter((c: any) => c.path.includes('job-json-apply')).length)).toBe(1);
+  const jsonPosts = await page.evaluate(() => (window as any).jsonPostCalls);
+  const formPosts = await page.evaluate(() => (window as any).apiPostCalls);
+  expect(jsonPosts).toHaveLength(1);
+  expect(jsonPosts[0].path).toBe('/api/mcp/config/apply');
+  expect(jsonPosts[0].timeoutMs).toBe(130000);
+  expect(formPosts).toHaveLength(0);
+});
+
+test('request governor sends structured JSON and honors an explicit MCP deadline', async ({ page }) => {
+  await page.route(ORIGIN + '/**', (route: any) =>
+    route.fulfill({ contentType: 'text/html', body: '<html><body></body></html>' }));
+  await page.goto(ORIGIN + '/');
+  await page.addScriptTag({ path: GOVERNOR });
+  const result = await page.evaluate(async () => {
+    const w = window as any;
+    w.deadlines = [];
+    const originalSetTimeout = w.setTimeout;
+    w.setTimeout = (callback: any, delay: number) => {
+      w.deadlines.push(delay);
+      return originalSetTimeout(callback, delay);
+    };
+    w.apiRequest = null;
+    w.fetch = async (url: string, options: any) => {
+      w.apiRequest = { url, options };
+      return new Response(JSON.stringify({ success: true, allowed: true }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } });
+    };
+    const response = await w.apiPostJson('/api/mcp/config/preflight',
+      { baseRevision: 'rev-a', operations: [{ section: 'peripherals', patch: { enabled: true } }] }, 45000);
+    return { response, request: w.apiRequest, deadlines: w.deadlines };
+  });
+  expect(result.response.allowed).toBe(true);
+  expect(result.request.options.headers['Content-Type']).toBe('application/json');
+  expect(JSON.parse(result.request.options.body).operations).toEqual([{ section: 'peripherals', patch: { enabled: true } }]);
+  expect(result.deadlines).toContain(45000);
+});
+
+test('large section snapshot uses a bounded independent result budget', async ({ page }) => {
+  await setup(page);
+  await pair(page);
+  await page.evaluate(() => {
+    const w = window as any;
+    w.MCP_SNAPSHOT = { success: true, revision: 'rev-large', sections: {
+      peripherals: { value: { large: 'x'.repeat(40000) } }
+    } };
+    w.FastBeeAiMcpConnector.start();
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).pendingPolls.length)).toBe(1);
+  await page.evaluate(() => {
+    (window as any).pendingPolls.shift()([
+      { jobId: 'job-large-snapshot', type: 'device.config.snapshot.read', section: 'peripherals',
+        idempotencyKey: 'k-large-snapshot', deadlineAt: Date.now() + 60_000 }
+    ]);
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).cloudCalls.filter((c: any) =>
+    c.path.includes('job-large-snapshot')).length)).toBe(1);
+  const result = (await page.evaluate(() => (window as any).cloudCalls)).find((c: any) =>
+    c.path.includes('job-large-snapshot'));
+  expect(result.body.status).toBe('SUCCEEDED');
+  expect(result.body.result.sections.peripherals.value.large).toHaveLength(40000);
 });
 
 test('production top-level managed responses preserve success partial UNKNOWN snapshot and pending operation states', async ({ page }) => {
@@ -340,6 +438,68 @@ test('production top-level managed responses preserve success partial UNKNOWN sn
   expect(result('job-readback').result.state).toBe('SUCCEEDED');
   expect(result('job-rollback').status).toBe('SUCCEEDED');
   expect(result('job-rollback').result.state).toBe('PARTIAL_ROLLBACK');
+});
+
+test('cloud leased-job transport metadata and section query reach the snapshot handler without weakening status validation', async ({ page }) => {
+  await setup(page);
+  await pair(page);
+  const snapshotCallsBefore = await page.evaluate(() => (window as any).apiCalls
+    .filter((path: string) => path.startsWith('/api/mcp/config/snapshot')).length);
+  await page.evaluate(() => (window as any).FastBeeAiMcpConnector.start());
+  await expect.poll(() => page.evaluate(() => (window as any).pendingPolls.length)).toBe(1);
+  await page.evaluate(() => {
+    (window as any).pendingPolls.shift()([
+      { jobId: 'job-leased-snapshot', type: 'device.config.snapshot.read', idempotencyKey: 'k-leased-s',
+        section: 'peripherals', status: 'LEASED', duplicate: false, deadlineAt: Date.now() + 60_000 },
+      { jobId: 'job-unleased-snapshot', type: 'device.config.snapshot.read', idempotencyKey: 'k-unleased-s',
+        status: 'PENDING', duplicate: false, deadlineAt: Date.now() + 60_000 },
+      { jobId: 'job-screen-snapshot', type: 'device.config.snapshot.read', idempotencyKey: 'k-screen-s',
+        section: 'screenPanel', status: 'LEASED', duplicate: false, deadlineAt: Date.now() + 60_000 },
+    ]);
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).cloudCalls.filter((c: any) => c.path.endsWith('/result')).length))
+    .toBe(3);
+  const calls = await page.evaluate(() => (window as any).cloudCalls);
+  const leased = calls.find((c: any) => c.path.includes('job-leased-snapshot')).body;
+  const unleased = calls.find((c: any) => c.path.includes('job-unleased-snapshot')).body;
+  const screen = calls.find((c: any) => c.path.includes('job-screen-snapshot')).body;
+  expect(leased.status).toBe('SUCCEEDED');
+  expect(leased.result.revision).toBe('rev-a');
+  expect(unleased.status).toBe('FAILED');
+  expect(unleased.error).toBe('INVALID_ARGUMENT');
+  expect(screen.status).toBe('FAILED');
+  expect(screen.error).toBe('INVALID_ARGUMENT');
+  const apiCalls = await page.evaluate(() => (window as any).apiCalls);
+  expect(apiCalls.filter((path: string) => path.startsWith('/api/mcp/config/snapshot')))
+    .toHaveLength(snapshotCallsBefore + 1);
+  expect(apiCalls).toContain('/api/mcp/config/snapshot?sections=peripherals');
+});
+
+test('peripheral catalog compaction preserves cloud validation semantics within the registration budget', async ({ page }) => {
+  await setup(page);
+  await page.evaluate(() => {
+    const row = (window as any).PERIPHERAL_TYPES.data.gpio[0];
+    row.outputCapable = true;
+    row.requiredFeature = 'deviceControl';
+    row.fields = { mode: { enum: ['safe', 'unsafe'], description: 'display only' } };
+    row.driverDescriptors = [{ padding: 'x'.repeat(20000) }];
+  });
+  await pair(page);
+  const pairCall = (await page.evaluate(() => (window as any).cloudCalls))
+    .find((call: any) => call.path === '/connector/v1/pair');
+  const capabilities = pairCall.body.device.capabilities;
+  const catalog = capabilities.peripheralCatalog;
+  expect(capabilities.peripheralCatalogOversize).toBeUndefined();
+  expect(catalog).toBeDefined();
+  expect(catalog.profile.max).toBe(16);
+  expect(catalog.hardware.maxGpio).toBe(48);
+  expect(catalog.hardware.reservedPins).toEqual([26]);
+  expect(catalog.data.gpio[0].value).toBe(12);
+  expect(catalog.data.gpio[0].outputCapable).toBe(true);
+  expect(catalog.data.gpio[0].requiredFeature).toBe('deviceControl');
+  expect(catalog.data.gpio[0].fields.mode.enum).toEqual(['safe', 'unsafe']);
+  expect(catalog.data.gpio[0].driverDescriptors).toBeUndefined();
+  expect(new TextEncoder().encode(JSON.stringify(capabilities)).length).toBeLessThan(15360);
 });
 
 test('malformed success data and structured UNKNOWN are UNKNOWN while definitive rejection stays FAILED', async ({ page }) => {
@@ -443,7 +603,7 @@ test('unknown section and oversized results fail explicitly without fake success
   expect(calls.find((c: any) => c.path.includes('job-bad-section')).body.status).toBe('FAILED');
 
   await page.evaluate(() => {
-    (window as any).DEVICE_CONFIG = { success: true, data: { blob: 'x'.repeat(40000) } };
+    (window as any).DEVICE_CONFIG = { success: true, data: { blob: 'x'.repeat(50000) } };
     (window as any).pendingPolls.shift()([
       { jobId: 'job-big', type: 'device.config.section.read', section: 'device', idempotencyKey: 'k-3', deadlineAt: Date.now() + 60_000, leaseExpiresAt: Date.now() + 60_000 },
     ]);
@@ -879,4 +1039,39 @@ test('snapshot failure marks the execution catalog fetch as failed, not merely u
   expect(capabilities.executionCatalog).toBeUndefined();
   expect(capabilities.executionCatalogAvailable).toBe(false);
   expect(capabilities.executionCatalogFailed).toBe(true);
+});
+
+test('secret submission uses only the fixed device endpoint', async ({ page }) => {
+  await setup(page);
+  const result = await page.evaluate(async () => {
+    return await (window as any).FastBeeAiMcpConnector.submitSecret('protocol.mqtt.password', 'secret-value', 'secret-key-1');
+  });
+  expect(result.consumed).toBe(true);
+  const calls = await page.evaluate(() => (window as any).apiPostCalls);
+  expect(calls[0].path).toBe('/api/mcp/secrets/protocol.mqtt.password');
+  expect(calls[0].body).toEqual({ value: 'secret-value', idempotencyKey: 'secret-key-1' });
+  const cloud = await page.evaluate(() => (window as any).cloudCalls);
+  expect(JSON.stringify(cloud)).not.toContain('secret-value');
+});
+
+test('resource heartbeat contains measured values and omits unavailable fields', async ({ page }) => {
+  await setup(page);
+  const sample = await page.evaluate(async () => {
+    const w = window as any;
+    const value = await w.FastBeeAiMcpConnector.readResourceSample();
+    w.apiGet = async () => ({ success: true, data: {} });
+    const missing = await w.FastBeeAiMcpConnector.readResourceSample();
+    return { value, missing };
+  });
+  expect(sample.value.dramFree).toBe(123456);
+  expect(sample.value.dramMaxBlock).toBe(65536);
+  expect(sample.value.psramFree).toBe(789012);
+  expect(sample.value.taskStackMinFree).toBe(8192);
+  expect(sample.value.mqttState).toBe('CONNECTED');
+  expect(sample.value.modbusState).toBe('DISCONNECTED');
+  expect(sample.value.configRevision).toBe('rev-heartbeat');
+  expect(sample.value.sampledAt).toBeGreaterThan(0);
+  expect(sample.missing.dramFree).toBeUndefined();
+  expect(sample.missing.psramFree).toBeUndefined();
+  expect(sample.missing.configRevision).toBeUndefined();
 });

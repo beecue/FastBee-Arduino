@@ -32,18 +32,18 @@ $knownTargets = @(
     },
     [pscustomobject]@{
         Device = "ESP32-C3-F4R0"; Environment = "esp32c3-F4R0"; Port = "COM4"; Chip = "esp32c3"
-        FlashSize = 0x400000; AppOffset = 0x10000; AppSize = 0x330000
-        FsOffset = 0x340000; FsSize = 0x0C0000; VariantPolicy = "canonical"
+        FlashSize = 0x400000; AppOffset = 0x10000; AppSize = 0x340000
+        FsOffset = 0x350000; FsSize = 0x0B0000; VariantPolicy = "canonical"
     },
     [pscustomobject]@{
         Device = "ESP32-C6-F4R0"; Environment = "esp32c6-F4R0"; Port = "COM11"; Chip = "esp32c6"
-        FlashSize = 0x400000; AppOffset = 0x10000; AppSize = 0x330000
-        FsOffset = 0x340000; FsSize = 0x0C0000; VariantPolicy = "canonical"
+        FlashSize = 0x400000; AppOffset = 0x10000; AppSize = 0x340000
+        FsOffset = 0x350000; FsSize = 0x0B0000; VariantPolicy = "canonical"
     },
     [pscustomobject]@{
         Device = "ESP32-F4R0"; Environment = "esp32-F4R0"; Port = "COM16"; Chip = "esp32"
-        FlashSize = 0x400000; AppOffset = 0x10000; AppSize = 0x330000
-        FsOffset = 0x340000; FsSize = 0x0C0000; VariantPolicy = "canonical"
+        FlashSize = 0x400000; AppOffset = 0x10000; AppSize = 0x340000
+        FsOffset = 0x350000; FsSize = 0x0B0000; VariantPolicy = "canonical"
     },
     [pscustomobject]@{
         Device = "ESP32-S3-F8R0"; Environment = "esp32s3-F8R0"; Port = "COM7"; Chip = "esp32s3"

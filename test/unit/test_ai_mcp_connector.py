@@ -184,6 +184,16 @@ class AiMcpConnectorContractTests(unittest.TestCase):
         self.assertIn("configRevision", SOURCE)
         self.assertIn("executionCatalogFailed", SOURCE)
 
+    def test_snapshot_is_section_scoped_and_revision_has_a_bounded_channel(self):
+        self.assertIn("'device.config.revision.read'", SOURCE)
+        self.assertIn("readGlobalRevision", SOURCE)
+        self.assertIn("'/api/mcp/capabilities'", SOURCE)
+        snapshot = re.search(r"'device\.config\.snapshot\.read':\s*function\s*\(job\)\s*\{(.*?)\n        \}", SOURCE,
+                             re.DOTALL)
+        self.assertIsNotNone(snapshot)
+        self.assertIn("job.section", snapshot.group(1))
+        self.assertIn("sections=", snapshot.group(1))
+
     def test_execution_catalog_rows_are_strictly_validated(self):
         # 畸形/重复目录行不得被接受：必填字段类型化非空、ID/类型值唯一，整体放弃而不是挑选部分行
         for validator in ("_validTriggerTypes", "_validEvents", "_validActionTypes", "_validControls"):

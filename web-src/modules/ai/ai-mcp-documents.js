@@ -83,7 +83,7 @@
         return sha256(file).then(function (digest) {
             FastBeeAiMcpTools.checkSignal(signal);
             return FastBeeAiMcpTools.callTrustedTool('request_document_upload', {
-                fileName: file.name, size: file.size, contentType: file.type || 'application/octet-stream', sha256: digest
+                fileName: file.name, sizeBytes: file.size, sha256: digest
             }, signal).then(function (ticket) {
                 FastBeeAiMcpTools.checkSignal(signal);
                 var id = ticket && (ticket.uploadTicket || ticket.ticket);
@@ -117,11 +117,11 @@
         });
     }
     function search(query) {
-        if (typeof query !== 'string' || !query || query.length > 256) return Promise.reject(new Error('AI_INVALID_TOOL_ARGUMENTS'));
-        return boundedCall('search_documents', { query: query, pageSize: 10 });
+        if (typeof query !== 'string' || !query || query.length > 100) return Promise.reject(new Error('AI_INVALID_TOOL_ARGUMENTS'));
+        return boundedCall('search_documents', { query: query, limit: 10 });
     }
     function facts(documentId, kind) {
-        var args = { documentId: documentId, pageSize: 50 };
+        var args = { documentId: documentId };
         if (kind) args.kind = kind;
         return boundedCall('extract_configuration_facts', args);
     }
