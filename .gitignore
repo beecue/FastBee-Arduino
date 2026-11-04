@@ -51,6 +51,7 @@ partitions_dump.bin
 # Test reports and coverage
 test/browser/test-results/
 test/browser/reports/
+test/browser/artifacts/
 test/browser/test-regression-output.txt
 test/reports/
 playwright-report/
